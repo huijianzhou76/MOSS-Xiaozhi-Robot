@@ -152,8 +152,8 @@ def create_app(settings: GatewaySettings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=f"unknown tool: {call.name}") from None
         return {"ok": True, "name": call.name, "result": result}
 
-    @app.post("/mcp", dependencies=[Depends(require_admin)])
-    async def mcp(request: JsonRpcRequest) -> dict[str, Any] | Response:
+    @app.post("/mcp", dependencies=[Depends(require_admin)], response_model=None)
+    async def mcp(request: JsonRpcRequest) -> Any:
         if request.id is None:
             return Response(status_code=204)
 
