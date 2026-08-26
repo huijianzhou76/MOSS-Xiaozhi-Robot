@@ -400,6 +400,23 @@ void Application::Start() {
     }
     codec->Start();
 
+    tts_engine_.SetPacketSink([this](AudioStreamPacket&& packet) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (audio_decode_queue_.size() >= MAX_AUDIO_PACKETS_IN_QUEUE) {
+            ESP_LOGW(TAG, "TTS decode queue full, dropping newest packet");
+            return false;
+        }
+        audio_decode_queue_.emplace_back(std::move(packet));
+        return true;
+    });
+    tts_engine_.SetStateCallback([](moss::speech::TtsState state, const moss::speech::TtsSession& session) {
+        ESP_LOGI(TAG, "TTS: state=%s source=%s priority=%u id=%s",
+            moss::speech::TtsEngine::StateName(state),
+            moss::speech::TtsEngine::SourceName(session.source),
+            static_cast<unsigned>(session.priority),
+            session.id.c_str());
+    });
+
 #if CONFIG_USE_AUDIO_PROCESSOR
     xTaskCreatePinnedToCore([](void* arg) {
         Application* app = (Application*)arg;
@@ -448,9 +465,8 @@ void Application::Start() {
         Alert(Lang::Strings::ERROR, message.c_str(), "sad", Lang::Sounds::P3_EXCLAMATION);
     });
     protocol_->OnIncomingAudio([this](AudioStreamPacket&& packet) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (device_state_ == kDeviceStateSpeaking && audio_decode_queue_.size() < MAX_AUDIO_PACKETS_IN_QUEUE) {
-            audio_decode_queue_.emplace_back(std::move(packet));
+        if (!tts_engine_.PushAudio(std::move(packet))) {
+            ESP_LOGD(TAG, "Ignoring audio packet outside active TTS stream");
         }
     });
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
@@ -474,6 +490,9 @@ void Application::Start() {
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
+            tts_engine_.Interrupt(moss::speech::TtsPriority::Alarm, true);
+            ResetDecoder();
+            tts_engine_.Reset();
             SetDeviceState(kDeviceStateIdle);
         });
     });
@@ -483,6 +502,13 @@ void Application::Start() {
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
+                std::string stream_id = protocol_ ? protocol_->session_id() : std::string();
+                if (!tts_engine_.Begin(moss::speech::TtsSource::XiaozhiServer,
+                                       moss::speech::TtsPriority::Chat,
+                                       std::move(stream_id))) {
+                    ESP_LOGW(TAG, "Rejected lower-priority TTS stream");
+                    return;
+                }
                 Schedule([this]() {
                     aborted_ = false;
                     if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
@@ -490,19 +516,13 @@ void Application::Start() {
                     }
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
-                Schedule([this]() {
-                    background_task_->WaitForCompletion();
-                    if (device_state_ == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
-                        } else {
-                            SetDeviceState(kDeviceStateListening);
-                        }
-                    }
-                });
+                // Provider input is complete, but queued Opus may still be playing.
+                // OnAudioOutput will return to listening only after the queue drains.
+                tts_engine_.EndInput();
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
                 if (cJSON_IsString(text)) {
+                    tts_engine_.SetCurrentText(text->valuestring);
                     ESP_LOGI(TAG, "<< %s", text->valuestring);
                     Schedule([this, display, message = std::string(text->valuestring)]() {
                         display->SetChatMessage("assistant", message.c_str());
@@ -782,6 +802,21 @@ void Application::OnAudioOutput() {
 
     std::unique_lock<std::mutex> lock(mutex_);
     if (audio_decode_queue_.empty()) {
+        const bool finish_tts = tts_engine_.IsDraining();
+        lock.unlock();
+
+        if (finish_tts && tts_engine_.MarkPlaybackDrained()) {
+            Schedule([this]() {
+                if (device_state_ == kDeviceStateSpeaking) {
+                    if (listening_mode_ == kListeningModeManualStop) {
+                        SetDeviceState(kDeviceStateIdle);
+                    } else {
+                        SetDeviceState(kDeviceStateListening);
+                    }
+                }
+            });
+        }
+
         // Disable the output if there is no audio data for a long time
         if (device_state_ == kDeviceStateIdle) {
             auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - last_output_time_).count();
@@ -902,7 +937,11 @@ bool Application::ReadAudio(std::vector<int16_t>& data, int sample_rate, int sam
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
-    protocol_->SendAbortSpeaking(reason);
+    tts_engine_.Interrupt(moss::speech::TtsPriority::Alarm, true);
+    ResetDecoder();
+    if (protocol_) {
+        protocol_->SendAbortSpeaking(reason);
+    }
 }
 
 void Application::SetListeningMode(ListeningMode mode) {
@@ -953,8 +992,7 @@ void Application::SetDeviceState(DeviceState state) {
                 // Send the start listening command
                 protocol_->SendStartListening(listening_mode_);
                 if (previous_state == kDeviceStateSpeaking) {
-                    audio_decode_queue_.clear();
-                    audio_decode_cv_.notify_all();
+                    ResetDecoder();
                     // FIXME: Wait for the speaker to empty the buffer
                     vTaskDelay(pdMS_TO_TICKS(120));
                 }
