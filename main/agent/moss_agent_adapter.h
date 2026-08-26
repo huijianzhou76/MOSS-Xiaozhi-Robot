@@ -155,6 +155,7 @@ public:
         cJSON_AddBoolToObject(caps, "barge_in", true);
         cJSON_AddBoolToObject(caps, "memory", true);
         cJSON_AddStringToObject(caps, "memory_scope", "device-local");
+        cJSON_AddBoolToObject(caps, "hardware_profile", true);
         auto result = PrintJson(root);
         cJSON_Delete(root);
         return result;
