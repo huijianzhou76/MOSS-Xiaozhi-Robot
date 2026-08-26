@@ -7,6 +7,7 @@
 #include "settings.h"
 #include "assets/lang_config.h"
 #include "gateway/moss_gateway_client.h"
+#include "vision/moss_vision_bootstrap.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -118,6 +119,10 @@ void WifiBoard::StartNetwork() {
     // Network is now genuinely ready. The Gateway autonomy worker remains idle
     // unless backend=moss-gateway and valid Gateway credentials are configured.
     moss::gateway::MossGatewayClient::GetInstance().NotifyNetworkReady();
+
+    // Only MOSS Gateway mode rewires Camera::Explain. Xiaozhi-only devices keep
+    // their existing server-provided vision configuration untouched.
+    moss::vision::MossVisionBootstrap::ConfigureFromGateway();
 }
 
 Http* WifiBoard::CreateHttp() {
