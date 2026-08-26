@@ -51,6 +51,10 @@ A lower-priority utterance cannot replace a higher-priority active utterance. Eq
 - Preserve the existing Opus/audio codec pipeline.
 - Keep provider selection extensible without rewriting `Application` again.
 
+## CI validation
+
+This branch is validated through the repository ESP-IDF 5.4 / ESP32-S3 pull-request build before it is merged to `main`.
+
 ## Next TTS steps
 
 After this branch is merged, later speech work can add a provider bridge on RDK X5 or another local host, streaming PCM/Opus back to this same engine. A dedicated MOSS voice, local fallback prompts, sentence-level streaming and explicit system/alarm preemption can then be added without changing the basic device audio lifecycle.
