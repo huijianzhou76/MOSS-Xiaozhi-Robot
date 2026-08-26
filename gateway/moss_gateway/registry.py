@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from fastapi import WebSocket
 
+from .events import sanitize_payload
 from .models import DeviceHello
 
 
@@ -32,7 +33,7 @@ class DeviceSession:
             "board_type": self.hello.board_type,
             "board_name": self.hello.board_name,
             "device_session_id": self.hello.session_id,
-            "capabilities": self.hello.capabilities,
+            "capabilities": sanitize_payload(self.hello.capabilities),
             "connected_at": self.connected_at,
             "last_seen_at": self.last_seen_at,
         }
