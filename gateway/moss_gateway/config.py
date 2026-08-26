@@ -49,6 +49,11 @@ class GatewaySettings:
     home_assistant_timeout_seconds: int = 5
     home_assistant_verify_tls: bool = True
     home_assistant_entity_allowlist: tuple[str, ...] = ()
+    vision_provider_url: str = ""
+    vision_provider_token: str = ""
+    vision_timeout_seconds: int = 30
+    vision_verify_tls: bool = True
+    vision_max_image_bytes: int = 2_000_000
 
     @classmethod
     def from_env(cls) -> "GatewaySettings":
@@ -72,6 +77,15 @@ class GatewaySettings:
             ),
             home_assistant_verify_tls=_env_bool("MOSS_HA_VERIFY_TLS", True),
             home_assistant_entity_allowlist=_env_csv("MOSS_HA_ENTITY_ALLOWLIST"),
+            vision_provider_url=os.getenv("MOSS_VISION_PROVIDER_URL", "").strip(),
+            vision_provider_token=os.getenv("MOSS_VISION_PROVIDER_TOKEN", "").strip(),
+            vision_timeout_seconds=_env_int(
+                "MOSS_VISION_TIMEOUT_SECONDS", 30, 1, 120
+            ),
+            vision_verify_tls=_env_bool("MOSS_VISION_VERIFY_TLS", True),
+            vision_max_image_bytes=_env_int(
+                "MOSS_VISION_MAX_IMAGE_BYTES", 2_000_000, 64_000, 10_000_000
+            ),
         )
 
     @property
@@ -85,6 +99,10 @@ class GatewaySettings:
     @property
     def home_assistant_configured(self) -> bool:
         return bool(self.home_assistant_url and self.home_assistant_token)
+
+    @property
+    def vision_provider_configured(self) -> bool:
+        return bool(self.vision_provider_url)
 
     @property
     def secure_mode(self) -> bool:

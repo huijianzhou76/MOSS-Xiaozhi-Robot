@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "moss-xiaozhi-gateway"
-version = "0.2.0"
+version = "0.3.0"
 description = "Host/RDK gateway for MOSS Xiaozhi devices"
 requires-python = ">=3.11"
 dependencies = [
@@ -12,6 +12,7 @@ dependencies = [
   "uvicorn>=0.35,<1",
   "pydantic>=2.11,<3",
   "httpx>=0.28,<1",
+  "python-multipart>=0.0.20,<1",
 ]
 
 [project.optional-dependencies]
