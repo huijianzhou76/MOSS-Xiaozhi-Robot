@@ -179,8 +179,11 @@ def create_app(
     async def call_tool(call: ToolCallRequest) -> dict[str, Any]:
         try:
             result = await runtime.tools.call(call.name, call.arguments)
-        except KeyError:
-            raise HTTPException(status_code=404, detail=f"unknown tool: {call.name}") from None
+        except KeyError as exc:
+            if runtime.tools.get(call.name) is None:
+                raise HTTPException(status_code=404, detail=f"unknown tool: {call.name}") from None
+            missing = str(exc.args[0])[:120] if exc.args else "unknown"
+            raise HTTPException(status_code=400, detail=f"missing required tool argument: {missing}") from None
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)[:500]) from None
         except ValueError as exc:
@@ -223,8 +226,11 @@ def create_app(
                 return _jsonrpc_error(request.id, -32602, "invalid tools/call params")
             try:
                 result = await runtime.tools.call(name, arguments)
-            except KeyError:
-                return _jsonrpc_error(request.id, -32601, f"unknown tool: {name}")
+            except KeyError as exc:
+                if runtime.tools.get(name) is None:
+                    return _jsonrpc_error(request.id, -32601, f"unknown tool: {name}")
+                missing = str(exc.args[0])[:120] if exc.args else "unknown"
+                return _jsonrpc_error(request.id, -32602, f"missing required tool argument: {missing}")
             except Exception as exc:  # adapter errors become bounded JSON-RPC errors
                 return _jsonrpc_error(request.id, -32000, str(exc)[:500])
 
