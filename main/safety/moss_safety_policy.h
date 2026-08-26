@@ -240,9 +240,6 @@ public:
     static RiskLevel Classify(const std::string& tool_name) {
         if (tool_name == "moss.safety.status" ||
             tool_name == "moss.safety.classify" ||
-            tool_name == "moss.safety.request" ||
-            tool_name == "moss.safety.authorize" ||
-            tool_name == "moss.safety.revoke" ||
             tool_name == "self.get_device_status" ||
             tool_name == "self.lampbar.get_status" ||
             tool_name == "self.lampeye.get_status" ||
@@ -256,7 +253,10 @@ public:
             return RiskLevel::ReadOnly;
         }
 
-        if (tool_name == "self.audio_speaker.set_volume" ||
+        if (tool_name == "moss.safety.request" ||
+            tool_name == "moss.safety.authorize" ||
+            tool_name == "moss.safety.revoke" ||
+            tool_name == "self.audio_speaker.set_volume" ||
             tool_name == "self.screen.set_brightness" ||
             tool_name == "self.screen.set_theme" ||
             tool_name == "code_display" ||
