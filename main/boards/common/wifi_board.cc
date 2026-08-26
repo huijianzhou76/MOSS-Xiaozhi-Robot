@@ -6,6 +6,7 @@
 #include "font_awesome_symbols.h"
 #include "settings.h"
 #include "assets/lang_config.h"
+#include "gateway/moss_gateway_client.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -113,6 +114,10 @@ void WifiBoard::StartNetwork() {
         EnterWifiConfigMode();
         return;
     }
+
+    // Network is now genuinely ready. The Gateway autonomy worker remains idle
+    // unless backend=moss-gateway and valid Gateway credentials are configured.
+    moss::gateway::MossGatewayClient::GetInstance().NotifyNetworkReady();
 }
 
 Http* WifiBoard::CreateHttp() {
@@ -122,12 +127,14 @@ Http* WifiBoard::CreateHttp() {
 WebSocket* WifiBoard::CreateWebSocket() {
     Settings settings("websocket", false);
     std::string url = settings.GetString("url");
+    return CreateWebSocketForUrl(url);
+}
+
+WebSocket* WifiBoard::CreateWebSocketForUrl(const std::string& url) {
     if (url.find("wss://") == 0) {
         return new WebSocket(new TlsTransport());
-    } else {
-        return new WebSocket(new TcpTransport());
     }
-    return nullptr;
+    return new WebSocket(new TcpTransport());
 }
 
 Mqtt* WifiBoard::CreateMqtt() {

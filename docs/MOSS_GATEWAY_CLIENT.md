@@ -1,44 +1,79 @@
 # ESP32 MOSS Gateway Client
 
-This layer gives the ESP32 device runtime a real control-channel connection to the Host/RDK `gateway/` service added in the previous stage.
+This layer gives the ESP32 device runtime a real control-channel connection to the Host/RDK `gateway/` service.
 
-It is intentionally separate from the existing Xiaozhi audio protocol. The current firmware can keep using Xiaozhi for conversational audio while a second WebSocket carries MOSS control-plane state to a local RDK X5 / host gateway.
+It remains intentionally separate from the existing Xiaozhi audio protocol. Xiaozhi can continue to carry conversational audio while the independent MOSS WebSocket carries device state and control-plane telemetry to a local RDK X5 / host gateway.
 
 ## Configuration
 
 The client stores two values in the ESP32 NVS namespace `moss_gateway`:
 
-- `url`: the complete WebSocket URL, for example `ws://192.168.1.20:8765/ws/device`
-- `token`: the device bearer token configured as `MOSS_GATEWAY_DEVICE_TOKEN` on the host
+- `url`: complete WebSocket URL, for example `ws://192.168.1.20:8765/ws/device`
+- `token`: device bearer token configured as `MOSS_GATEWAY_DEVICE_TOKEN` on the host
 
-The token is sent only in WebSocket request headers (`Authorization: Bearer ...` and `X-MOSS-Device-Token`). It is not added to `moss-agent/1.0` hello payloads, state events, status JSON or normal logs.
+Both `ws://` and `wss://` are supported. Wi-Fi boards now create the underlying TCP/TLS transport from the Gateway URL itself rather than accidentally inheriting the Xiaozhi WebSocket URL scheme.
 
-The current NVS storage is not claimed to be hardware-backed encrypted secret storage. Physical-device threat models should enable ESP-IDF NVS encryption / Secure Boot / Flash Encryption as a later hardening stage.
+Credentials embedded in a URL such as `wss://user:password@host/...` are rejected. Query strings and fragments are redacted from `moss.gateway.status`. The device token is sent only in WebSocket request headers (`Authorization: Bearer ...` and `X-MOSS-Device-Token`) and is not added to hello payloads, state events, status JSON or normal logs.
+
+Current NVS storage is not claimed to be hardware-backed encrypted secret storage. Physical-device hardening can later add ESP-IDF NVS encryption, Secure Boot and Flash Encryption.
 
 ## Required backend
 
-The client refuses to start unless the persisted Agent backend is explicitly `moss-gateway`:
+The client connects only while the Agent backend is explicitly `moss-gateway`:
 
 ```text
 moss.agent.set_backend backend=moss-gateway
 ```
 
-This prevents accidentally opening a second control channel merely because a URL was configured.
+Changing away from that backend causes the autonomy worker to close the independent Gateway socket. It does not touch the Xiaozhi audio connection.
+
+## Wi-Fi auto-start
+
+`WifiBoard::StartNetwork()` calls `NotifyNetworkReady()` only after `WifiStation::WaitForConnected()` has succeeded. At that point the Gateway autonomy worker starts once.
+
+The worker stays idle when any of these conditions is false:
+
+- network is ready
+- Gateway URL and token are configured
+- Agent backend is `moss-gateway`
+- the connection has not been manually suspended
+
+Therefore ordinary Xiaozhi-only devices do not open a MOSS Gateway connection merely because the feature exists in firmware.
+
+Other board/network families keep the explicit `moss.gateway.start` path for now. Their board-specific network-ready hook can be added separately after validation rather than assuming Wi-Fi semantics.
+
+## Reconnect and heartbeat
+
+Natural disconnects are retried with bounded exponential backoff:
+
+```text
+1s -> 2s -> 4s -> 8s -> ... -> 60s max
+```
+
+A successful connection resets the backoff. If the Gateway does not send `welcome` within 10 seconds, the client closes that session and retries.
+
+After `welcome`:
+
+- the client automatically sends one current `moss-agent` state event for the new Gateway session
+- it sends a heartbeat every 15 seconds
+- a failed heartbeat closes the socket so the reconnect loop can recover
+
+`moss.gateway.stop` is different from a network failure: it marks the connection manually suspended for the current runtime, so the autonomy worker does not immediately reconnect. `moss.gateway.start` clears that suspension and resumes automatic maintenance.
 
 ## MCP controls
 
-- `moss.gateway.status`: connection/configuration status; never returns the token
+- `moss.gateway.status`: configuration, network-ready, autonomy, connection, session, backoff and heartbeat status; never returns the token
 - `moss.gateway.configure`: persist URL and device token
-- `moss.gateway.start`: make a real WebSocket connection and send hello
-- `moss.gateway.stop`: close only the independent Gateway connection
-- `moss.gateway.heartbeat`: send one heartbeat with the current Agent phase
-- `moss.gateway.sync_state`: send one current `moss-agent` state event
+- `moss.gateway.start`: connect immediately and resume automatic reconnect for the current runtime
+- `moss.gateway.stop`: disconnect and suspend automatic reconnect until `start` is called again
+- `moss.gateway.heartbeat`: send an immediate heartbeat; the worker normally sends one every 15 seconds
+- `moss.gateway.sync_state`: manually send state; the worker also sends one after each new `welcome`
 
-These are new tool names. Until their risk classifications are explicitly reviewed in the central Safety table, the existing fail-closed policy treats them as `unknown` and therefore requires local-display authorization. That is deliberate and safer than silently whitelisting new control-plane tools.
+These names are still fail-closed under the existing central Safety policy until their exact classifications are reviewed in a dedicated safety-policy change. Manual MCP calls therefore require the existing local-display approval flow instead of silently expanding the control-plane allowlist. Autonomous network maintenance itself does not invoke physical MCP tools and does not bypass their safety gate.
 
 ## Wire protocol
 
-After the WebSocket upgrade succeeds, the ESP32 sends a `moss-agent/1.0` hello generated by `MossAgentAdapter` and adds the stable device UUID as `device_id`.
+After WebSocket upgrade, the ESP32 sends a `moss-agent/1.0` hello generated by `MossAgentAdapter` and adds the stable device UUID as `device_id`.
 
 The host replies with:
 
@@ -51,16 +86,16 @@ The host replies with:
 }
 ```
 
-The ESP32 records the gateway session ID and exposes it through `moss.gateway.status`.
+The device records the Gateway session ID and exposes it through the redacted status surface.
 
-The device can then send the host-supported control events `state` and `heartbeat`. This first client version does not accept arbitrary remote command execution from the host. Remote tool dispatch will be a later capability with a separate authorization model rather than an implicit side effect of opening the socket.
+The device currently sends host-supported `state` and `heartbeat` events. It still does not accept arbitrary remote command execution from the host. Remote tool dispatch will be a separate feature with an explicit authorization model.
 
-## Deliberate v1 limits
+## Current limits
 
-- explicit `start` is required; boot auto-start is not wired yet
-- no reconnect/backoff loop yet
-- no remote command execution yet
-- no audio is sent through this Gateway channel
-- no Home Assistant adapter is coupled into the ESP32 firmware
+- Wi-Fi boards have a validated network-ready auto-start hook; non-Wi-Fi board families still use explicit start
+- no arbitrary remote command execution
+- no audio is routed through the Gateway control channel
+- no Home Assistant adapter is coupled into ESP32 firmware
+- no claim of encrypted-at-rest NVS secrets yet
 
-These limits keep the first real device-to-gateway connection small enough to compile-test and reason about before adding autonomous behavior.
+These boundaries keep the control channel recoverable and autonomous without turning it into an unrestricted remote execution path.

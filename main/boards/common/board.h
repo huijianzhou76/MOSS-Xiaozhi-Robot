@@ -43,6 +43,13 @@ public:
     virtual Camera* GetCamera();
     virtual Http* CreateHttp() = 0;
     virtual WebSocket* CreateWebSocket() = 0;
+    // Optional target-aware websocket factory. Existing boards remain compatible
+    // through the default implementation, while boards that choose transport
+    // from URL scheme can override it for independent services such as MOSS Gateway.
+    virtual WebSocket* CreateWebSocketForUrl(const std::string& url) {
+        (void)url;
+        return CreateWebSocket();
+    }
     virtual Mqtt* CreateMqtt() = 0;
     virtual Udp* CreateUdp() = 0;
     virtual void StartNetwork() = 0;
