@@ -60,6 +60,13 @@ class GatewaySettings:
     mission_max_concurrent: int = 1
     memory_db_path: str = "./moss-gateway-data/memory.sqlite3"
     memory_max_entries: int = 5000
+    planner_provider_url: str = ""
+    planner_provider_token: str = ""
+    planner_timeout_seconds: int = 30
+    planner_verify_tls: bool = True
+    planner_max_steps: int = 8
+    planner_include_memory: bool = False
+    planner_memory_limit: int = 6
 
     @classmethod
     def from_env(cls) -> "GatewaySettings":
@@ -110,6 +117,21 @@ class GatewaySettings:
             memory_max_entries=_env_int(
                 "MOSS_MEMORY_MAX_ENTRIES", 5000, 100, 50000
             ),
+            planner_provider_url=os.getenv("MOSS_PLANNER_PROVIDER_URL", "").strip(),
+            planner_provider_token=os.getenv("MOSS_PLANNER_PROVIDER_TOKEN", "").strip(),
+            planner_timeout_seconds=_env_int(
+                "MOSS_PLANNER_TIMEOUT_SECONDS", 30, 1, 120
+            ),
+            planner_verify_tls=_env_bool("MOSS_PLANNER_VERIFY_TLS", True),
+            planner_max_steps=_env_int(
+                "MOSS_PLANNER_MAX_STEPS", 8, 1, 12
+            ),
+            planner_include_memory=_env_bool(
+                "MOSS_PLANNER_INCLUDE_MEMORY", False
+            ),
+            planner_memory_limit=_env_int(
+                "MOSS_PLANNER_MEMORY_LIMIT", 6, 1, 20
+            ),
         )
 
     @property
@@ -127,6 +149,10 @@ class GatewaySettings:
     @property
     def vision_provider_configured(self) -> bool:
         return bool(self.vision_provider_url)
+
+    @property
+    def planner_provider_configured(self) -> bool:
+        return bool(self.planner_provider_url)
 
     @property
     def secure_mode(self) -> bool:
