@@ -63,6 +63,12 @@ public:
         ExpireLocked(now);
 
         const RiskLevel risk = Classify(tool_name);
+        // Safety management calls have their own state-transition audit. Do not
+        // let status/classify reads overwrite the last protected-tool decision.
+        if (IsSafetyControl(tool_name)) {
+            return GateDecision{true, risk, false, "safety control allowed"};
+        }
+
         if (!RequiresAuthorization(risk)) {
             RecordDecisionLocked(tool_name, risk, "allowed");
             return GateDecision{true, risk, false, "allowed"};
@@ -173,6 +179,7 @@ public:
         ClearPendingLocked();
         grant_tool_.clear();
         grant_expires_at_us_ = 0;
+        RecordDecisionLocked("moss.safety.revoke", RiskLevel::LowImpact, "revoked");
     }
 
     std::string StatusJson() {
@@ -317,6 +324,14 @@ private:
     MossSafetyPolicy() = default;
     MossSafetyPolicy(const MossSafetyPolicy&) = delete;
     MossSafetyPolicy& operator=(const MossSafetyPolicy&) = delete;
+
+    static bool IsSafetyControl(const std::string& tool_name) {
+        return tool_name == "moss.safety.status" ||
+               tool_name == "moss.safety.classify" ||
+               tool_name == "moss.safety.request" ||
+               tool_name == "moss.safety.authorize" ||
+               tool_name == "moss.safety.revoke";
+    }
 
     static int64_t NowUs() {
         return esp_timer_get_time();
