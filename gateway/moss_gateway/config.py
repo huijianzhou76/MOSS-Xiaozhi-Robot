@@ -54,6 +54,10 @@ class GatewaySettings:
     vision_timeout_seconds: int = 30
     vision_verify_tls: bool = True
     vision_max_image_bytes: int = 2_000_000
+    mission_db_path: str = "./moss-gateway-data/missions.sqlite3"
+    mission_tick_seconds: int = 2
+    mission_heartbeat_seconds: int = 30
+    mission_max_concurrent: int = 1
 
     @classmethod
     def from_env(cls) -> "GatewaySettings":
@@ -85,6 +89,18 @@ class GatewaySettings:
             vision_verify_tls=_env_bool("MOSS_VISION_VERIFY_TLS", True),
             vision_max_image_bytes=_env_int(
                 "MOSS_VISION_MAX_IMAGE_BYTES", 2_000_000, 64_000, 10_000_000
+            ),
+            mission_db_path=os.getenv(
+                "MOSS_MISSION_DB_PATH", "./moss-gateway-data/missions.sqlite3"
+            ).strip() or "./moss-gateway-data/missions.sqlite3",
+            mission_tick_seconds=_env_int(
+                "MOSS_MISSION_TICK_SECONDS", 2, 1, 60
+            ),
+            mission_heartbeat_seconds=_env_int(
+                "MOSS_MISSION_HEARTBEAT_SECONDS", 30, 5, 300
+            ),
+            mission_max_concurrent=_env_int(
+                "MOSS_MISSION_MAX_CONCURRENT", 1, 1, 4
             ),
         )
 
