@@ -91,6 +91,10 @@ public:
             gateway_session_id_.clear();
         }
 
+        // A stale disconnected socket may still exist. Destroy it outside the
+        // client mutex because its destructor may invoke OnDisconnected().
+        Stop();
+
         WebSocket* socket = Board::GetInstance().CreateWebSocket();
         if (!socket) {
             SetError(error, "failed to create websocket client");
@@ -120,9 +124,6 @@ public:
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (websocket_) {
-                delete websocket_;
-            }
             websocket_ = socket;
             connected_ = false;
             welcomed_ = false;
@@ -130,14 +131,17 @@ public:
 
         ESP_LOGI("MossGatewayClient", "connecting to configured MOSS Gateway");
         if (!socket->Connect(url.c_str())) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            last_error_ = "gateway websocket connect failed";
-            connected_ = false;
-            if (websocket_ == socket) {
-                delete websocket_;
-                websocket_ = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                last_error_ = "gateway websocket connect failed";
+                connected_ = false;
+                if (websocket_ == socket) {
+                    websocket_ = nullptr;
+                }
             }
-            SetError(error, last_error_);
+            // Same rule as Stop(): release the mutex before destruction.
+            delete socket;
+            SetError(error, "gateway websocket connect failed");
             return false;
         }
 
