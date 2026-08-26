@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moss-xiaozhi-gateway"
+version = "0.1.0"
+description = "Host/RDK gateway for MOSS Xiaozhi devices"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "uvicorn>=0.35,<1",
+  "pydantic>=2.11,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28,<1",
+  "pytest>=8.4,<9",
+]
+
+[project.scripts]
+moss-gateway = "moss_gateway.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["moss_gateway*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
