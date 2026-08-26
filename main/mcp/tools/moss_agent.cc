@@ -21,7 +21,7 @@ public:
         McpServer::GetInstance().AddTool(
             "moss.agent.get_status",
             "读取设备端 Agent 适配层状态。返回当前 AI 后端、会话阶段与事件序号。",
-            PropertyList({}),
+            PropertyList(),
             [](const PropertyList&) -> ReturnValue {
                 auto& adapter = moss::agent::MossAgentAdapter::GetInstance();
                 adapter.Load();
@@ -55,7 +55,7 @@ public:
         McpServer::GetInstance().AddTool(
             "moss.agent.get_contract",
             "返回 MOSS Gateway 设备握手协议示例，用于 RDK X5 / 自建 Agent Gateway 对接。",
-            PropertyList({}),
+            PropertyList(),
             [](const PropertyList&) -> ReturnValue {
                 auto& adapter = moss::agent::MossAgentAdapter::GetInstance();
                 adapter.Load();
