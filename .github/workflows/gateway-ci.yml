@@ -1,0 +1,37 @@
+name: Gateway Test
+
+on:
+  pull_request:
+    paths:
+      - "gateway/**"
+      - ".github/workflows/gateway-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "gateway/**"
+      - ".github/workflows/gateway-ci.yml"
+
+jobs:
+  gateway-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: gateway/pyproject.toml
+
+      - name: Install gateway and test dependencies
+        run: python -m pip install -e "./gateway[dev]"
+
+      - name: Compile Python package
+        run: python -m compileall -q gateway/moss_gateway
+
+      - name: Run gateway tests
+        run: python -m pytest gateway/tests
