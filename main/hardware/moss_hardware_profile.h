@@ -149,30 +149,37 @@ public:
 
 private:
     static void AddSafeNetworkState(cJSON* root, const std::string& board_status_json) {
-        cJSON* network_out = cJSON_AddObjectToObject(root, "network");
-        cJSON_AddBoolToObject(network_out, "available", false);
+        bool available = false;
+        std::string type;
+        std::string signal;
 
         cJSON* status = cJSON_Parse(board_status_json.c_str());
-        if (!status || !cJSON_IsObject(status)) {
-            if (status) {
-                cJSON_Delete(status);
+        if (status && cJSON_IsObject(status)) {
+            const cJSON* network = cJSON_GetObjectItem(status, "network");
+            if (cJSON_IsObject(network)) {
+                available = true;
+                const cJSON* type_item = cJSON_GetObjectItem(network, "type");
+                const cJSON* signal_item = cJSON_GetObjectItem(network, "signal");
+                if (cJSON_IsString(type_item)) {
+                    type = type_item->valuestring;
+                }
+                if (cJSON_IsString(signal_item)) {
+                    signal = signal_item->valuestring;
+                }
             }
-            return;
+        }
+        if (status) {
+            cJSON_Delete(status);
         }
 
-        const cJSON* network = cJSON_GetObjectItem(status, "network");
-        if (cJSON_IsObject(network)) {
-            cJSON_ReplaceItemInObject(network_out, "available", cJSON_CreateBool(true));
-            const cJSON* type = cJSON_GetObjectItem(network, "type");
-            const cJSON* signal = cJSON_GetObjectItem(network, "signal");
-            if (cJSON_IsString(type)) {
-                cJSON_AddStringToObject(network_out, "type", type->valuestring);
-            }
-            if (cJSON_IsString(signal)) {
-                cJSON_AddStringToObject(network_out, "signal", signal->valuestring);
-            }
+        cJSON* network_out = cJSON_AddObjectToObject(root, "network");
+        cJSON_AddBoolToObject(network_out, "available", available);
+        if (!type.empty()) {
+            cJSON_AddStringToObject(network_out, "type", type.c_str());
         }
-        cJSON_Delete(status);
+        if (!signal.empty()) {
+            cJSON_AddStringToObject(network_out, "signal", signal.c_str());
+        }
     }
 
     static std::string PrintJson(cJSON* root) {
