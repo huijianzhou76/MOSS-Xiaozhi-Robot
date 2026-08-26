@@ -32,7 +32,7 @@ public:
                    const std::string& token,
                    std::string* error = nullptr) {
         if (!IsValidUrl(url)) {
-            SetError(error, "gateway URL must start with ws:// or wss://");
+            SetError(error, "gateway URL must use ws:// or wss:// and must not embed credentials");
             return false;
         }
         if (url.size() > 256) {
@@ -194,7 +194,9 @@ public:
         cJSON_AddBoolToObject(root, "configured", !url_.empty() && !token_.empty());
         cJSON_AddBoolToObject(root, "connected", connected_);
         cJSON_AddBoolToObject(root, "welcomed", welcomed_);
-        cJSON_AddStringToObject(root, "url", url_.c_str());
+        const std::string safe_url = RedactUrl(url_);
+        cJSON_AddStringToObject(root, "url", safe_url.c_str());
+        cJSON_AddBoolToObject(root, "url_query_redacted", safe_url != url_);
         cJSON_AddBoolToObject(root, "token_configured", !token_.empty());
         cJSON_AddBoolToObject(root, "token_exposed", false);
         cJSON_AddNumberToObject(root, "messages_sent", messages_sent_);
@@ -322,7 +324,28 @@ private:
     }
 
     static bool IsValidUrl(const std::string& url) {
-        return url.rfind("ws://", 0) == 0 || url.rfind("wss://", 0) == 0;
+        const bool supported_scheme = url.rfind("ws://", 0) == 0 || url.rfind("wss://", 0) == 0;
+        if (!supported_scheme) {
+            return false;
+        }
+        const size_t scheme_end = url.find("://");
+        if (scheme_end == std::string::npos) {
+            return false;
+        }
+        const size_t authority_start = scheme_end + 3;
+        const size_t authority_end = url.find_first_of("/?#", authority_start);
+        const std::string authority = url.substr(
+            authority_start,
+            authority_end == std::string::npos ? std::string::npos : authority_end - authority_start);
+        return !authority.empty() && authority.find('@') == std::string::npos;
+    }
+
+    static std::string RedactUrl(const std::string& url) {
+        const size_t sensitive = url.find_first_of("?#");
+        if (sensitive == std::string::npos) {
+            return url;
+        }
+        return url.substr(0, sensitive) + "?[redacted]";
     }
 
     static void SetError(std::string* error, const std::string& message) {
