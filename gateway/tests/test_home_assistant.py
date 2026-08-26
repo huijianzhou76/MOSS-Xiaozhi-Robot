@@ -87,7 +87,11 @@ def test_home_status_and_entity_list_are_privacy_reduced() -> None:
         body = status.json()["result"]
         assert body["configured"] is True
         assert body["reachable"] is True
-        assert body["token_exposed"] is False
+        # Tool results pass through the gateway-wide sanitizer. Metadata keys
+        # containing "token" are therefore redacted too; the actual secret must
+        # never be returned.
+        assert body["token_exposed"] == "<redacted>"
+        assert body["token_configured"] == "<redacted>"
         assert "ha-secret" not in status.text
 
         listed = client.post(
@@ -190,6 +194,32 @@ def test_mcp_exposes_named_home_tools_but_no_generic_service_proxy() -> None:
         assert "home.climate.set_temperature" in names
         assert "home.service.call" not in names
         assert "home.raw.call" not in names
+
+
+def test_missing_home_tool_argument_is_invalid_params_not_unknown_tool() -> None:
+    app = create_app(ha_settings(), home_assistant_transport=make_transport())
+    headers = {"Authorization": "Bearer admin-secret"}
+
+    with TestClient(app) as client:
+        rest = client.post(
+            "/api/v1/tools/call",
+            headers=headers,
+            json={"name": "home.entity.get", "arguments": {}},
+        )
+        assert rest.status_code == 400
+        assert "missing required tool argument" in rest.text
+
+        mcp = client.post(
+            "/mcp",
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {"name": "home.entity.get", "arguments": {}},
+            },
+        ).json()
+        assert mcp["error"]["code"] == -32602
 
 
 def test_home_assistant_url_rejects_embedded_credentials() -> None:
