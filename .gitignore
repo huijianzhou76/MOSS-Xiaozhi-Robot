@@ -12,3 +12,7 @@ releases/
 main/assets/lang_config.h
 .DS_Store
 .cache
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
