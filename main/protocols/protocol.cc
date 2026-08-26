@@ -2,10 +2,65 @@
 
 #include <esp_log.h>
 
+#include "agent/moss_agent_adapter.h"
+
 #define TAG "Protocol"
 
+namespace {
+
+void ObserveAgentJson(const cJSON* root) {
+    if (!root || !cJSON_IsObject(root)) {
+        return;
+    }
+
+    const cJSON* type = cJSON_GetObjectItem(root, "type");
+    if (!cJSON_IsString(type)) {
+        return;
+    }
+
+    auto& agent = moss::agent::MossAgentAdapter::GetInstance();
+    const std::string type_value = type->valuestring;
+
+    if (type_value == "stt") {
+        const cJSON* text = cJSON_GetObjectItem(root, "text");
+        if (cJSON_IsString(text)) {
+            agent.OnUserText(text->valuestring);
+        } else {
+            agent.OnThinking();
+        }
+        return;
+    }
+
+    if (type_value == "tts") {
+        const cJSON* state = cJSON_GetObjectItem(root, "state");
+        if (!cJSON_IsString(state)) {
+            return;
+        }
+
+        const std::string state_value = state->valuestring;
+        if (state_value == "start") {
+            agent.OnSpeaking(true);
+        } else if (state_value == "sentence_start") {
+            const cJSON* text = cJSON_GetObjectItem(root, "text");
+            if (cJSON_IsString(text)) {
+                agent.OnAssistantText(text->valuestring);
+            }
+        }
+        // Do not mark speaking=false on provider "stop". The Application keeps
+        // draining buffered Opus after that message. Runtime reconciliation will
+        // move the phase back to listening/idle only after playback really ends.
+    }
+}
+
+}  // namespace
+
 void Protocol::OnIncomingJson(std::function<void(const cJSON* root)> callback) {
-    on_incoming_json_ = callback;
+    on_incoming_json_ = [callback = std::move(callback)](const cJSON* root) {
+        ObserveAgentJson(root);
+        if (callback) {
+            callback(root);
+        }
+    };
 }
 
 void Protocol::OnIncomingAudio(std::function<void(AudioStreamPacket&& packet)> callback) {
@@ -13,21 +68,38 @@ void Protocol::OnIncomingAudio(std::function<void(AudioStreamPacket&& packet)> c
 }
 
 void Protocol::OnAudioChannelOpened(std::function<void()> callback) {
-    on_audio_channel_opened_ = callback;
+    on_audio_channel_opened_ = [this, callback = std::move(callback)]() {
+        moss::agent::MossAgentAdapter::GetInstance().OnChannelOpened(session_id_);
+        if (callback) {
+            callback();
+        }
+    };
 }
 
 void Protocol::OnAudioChannelClosed(std::function<void()> callback) {
-    on_audio_channel_closed_ = callback;
+    on_audio_channel_closed_ = [callback = std::move(callback)]() {
+        moss::agent::MossAgentAdapter::GetInstance().OnChannelClosed();
+        if (callback) {
+            callback();
+        }
+    };
 }
 
 void Protocol::OnNetworkError(std::function<void(const std::string& message)> callback) {
-    on_network_error_ = callback;
+    on_network_error_ = [callback = std::move(callback)](const std::string& message) {
+        moss::agent::MossAgentAdapter::GetInstance().OnError();
+        if (callback) {
+            callback(message);
+        }
+    };
 }
 
 void Protocol::SetError(const std::string& message) {
     error_occurred_ = true;
     if (on_network_error_ != nullptr) {
         on_network_error_(message);
+    } else {
+        moss::agent::MossAgentAdapter::GetInstance().OnError();
     }
 }
 
@@ -47,6 +119,8 @@ void Protocol::SendWakeWordDetected(const std::string& wake_word) {
 }
 
 void Protocol::SendStartListening(ListeningMode mode) {
+    moss::agent::MossAgentAdapter::GetInstance().OnListening();
+
     std::string message = "{\"session_id\":\"" + session_id_ + "\"";
     message += ",\"type\":\"listen\",\"state\":\"start\"";
     if (mode == kListeningModeRealtime) {
@@ -61,6 +135,8 @@ void Protocol::SendStartListening(ListeningMode mode) {
 }
 
 void Protocol::SendStopListening() {
+    moss::agent::MossAgentAdapter::GetInstance().OnThinking();
+
     std::string message = "{\"session_id\":\"" + session_id_ + "\",\"type\":\"listen\",\"state\":\"stop\"}";
     SendText(message);
 }
