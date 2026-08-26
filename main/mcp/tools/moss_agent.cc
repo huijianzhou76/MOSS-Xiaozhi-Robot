@@ -1,10 +1,43 @@
 #include "mcp_tools.h"
 #include "agent/moss_agent_adapter.h"
+#include "application.h"
 
 #include <esp_log.h>
 #include <string>
 
 namespace mcp_tools {
+
+namespace {
+
+moss::agent::AgentPhase MapDevicePhase(DeviceState state) {
+    switch (state) {
+        case kDeviceStateListening:
+            return moss::agent::AgentPhase::Listening;
+        case kDeviceStateSpeaking:
+            return moss::agent::AgentPhase::Speaking;
+        case kDeviceStateFatalError:
+            return moss::agent::AgentPhase::Error;
+        case kDeviceStateUnknown:
+        case kDeviceStateStarting:
+        case kDeviceStateWifiConfiguring:
+        case kDeviceStateIdle:
+        case kDeviceStateConnecting:
+        case kDeviceStateUpgrading:
+        case kDeviceStateActivating:
+        default:
+            return moss::agent::AgentPhase::Idle;
+    }
+}
+
+void SyncWithApplication(moss::agent::MossAgentAdapter& adapter) {
+    auto& app = Application::GetInstance();
+    adapter.SyncRuntime(
+        app.IsAudioChannelOpened(),
+        app.GetSessionId(),
+        MapDevicePhase(app.GetDeviceState()));
+}
+
+}  // namespace
 
 class MossAgentControl : public McpTool {
 public:
@@ -20,20 +53,13 @@ public:
 
         McpServer::GetInstance().AddTool(
             "moss.agent.get_status",
-            "读取设备端 Agent 适配层状态。返回当前 AI 后端、会话阶段与事件序号。",
+            "读取绑定到真实 Application/Protocol 的 MOSS Agent 运行状态。返回 backend、phase、audio channel、session 与事件序号；thinking/speaking/tool execution 来自实时协议和工具生命周期，而不是 UI 模拟。",
             PropertyList(),
             [](const PropertyList&) -> ReturnValue {
                 auto& adapter = moss::agent::MossAgentAdapter::GetInstance();
                 adapter.Load();
-                const auto state = adapter.snapshot();
-
-                std::string result = "backend=";
-                result += moss::agent::MossAgentAdapter::BackendName(state.backend);
-                result += "; phase=";
-                result += moss::agent::MossAgentAdapter::PhaseName(state.phase);
-                result += "; session_id=" + state.session_id;
-                result += "; seq=" + std::to_string(state.event_sequence);
-                return result;
+                SyncWithApplication(adapter);
+                return adapter.StatusJson();
             });
 
         McpServer::GetInstance().AddTool(
@@ -54,11 +80,12 @@ public:
 
         McpServer::GetInstance().AddTool(
             "moss.agent.get_contract",
-            "返回 MOSS Gateway 设备握手协议示例，用于 RDK X5 / 自建 Agent Gateway 对接。",
+            "返回 MOSS Gateway 设备握手协议示例，用于 RDK X5 / 自建 Agent Gateway 对接。握手中的 session_id 与 runtime_state capability 来自当前设备运行时。",
             PropertyList(),
             [](const PropertyList&) -> ReturnValue {
                 auto& adapter = moss::agent::MossAgentAdapter::GetInstance();
                 adapter.Load();
+                SyncWithApplication(adapter);
 #ifdef BOARD_TYPE
                 const std::string board_type = BOARD_TYPE;
 #else

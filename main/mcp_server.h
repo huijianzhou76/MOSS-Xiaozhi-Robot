@@ -12,6 +12,7 @@
 
 #include <cJSON.h>
 
+#include "agent/moss_agent_adapter.h"
 #include "safety/moss_safety_policy.h"
 
 // 添加类型别名
@@ -234,7 +235,31 @@ public:
                 "; request local-display authorization first");
         }
 
-        ReturnValue return_value = callback_(properties);
+        // Status/contract introspection should report the runtime being observed,
+        // not the fact that the inspection tool itself is executing.
+        const bool track_execution =
+            name_ != "moss.agent.get_status" &&
+            name_ != "moss.agent.get_contract";
+
+        auto& agent = moss::agent::MossAgentAdapter::GetInstance();
+        if (track_execution) {
+            agent.OnToolState(true);
+        }
+
+        ReturnValue return_value = false;
+        try {
+            return_value = callback_(properties);
+        } catch (...) {
+            if (track_execution) {
+                agent.OnToolState(false);
+            }
+            throw;
+        }
+
+        if (track_execution) {
+            agent.OnToolState(false);
+        }
+
         // 返回结果
         cJSON* result = cJSON_CreateObject();
         cJSON* content = cJSON_CreateArray();
