@@ -1,6 +1,5 @@
 #pragma once
 
-#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <mutex>
@@ -39,10 +38,10 @@ struct AuthorizationChallenge {
 
 // Central device-side safety gate for MCP tool execution.
 //
-// Standard policy intentionally allows read-only, low-impact and sensitive
-// software operations while requiring explicit local approval for physical,
-// destructive and previously-unknown tools. Unknown tools fail guarded so a
-// newly-added actuator cannot silently bypass the gate.
+// Standard policy intentionally allows known read-only, low-impact and
+// sensitive software operations while requiring explicit local approval for
+// physical, destructive and previously-unknown tools. Every known tool is
+// named explicitly; future names fail closed as Unknown until reviewed.
 //
 // Approval is local-display based. The code is never exposed through MCP.
 // Grants live only in RAM, target one exact tool, expire quickly and are
@@ -239,11 +238,12 @@ public:
     }
 
     static RiskLevel Classify(const std::string& tool_name) {
-        if (StartsWith(tool_name, "moss.safety.")) {
-            return RiskLevel::ReadOnly;
-        }
-
-        if (tool_name == "self.get_device_status" ||
+        if (tool_name == "moss.safety.status" ||
+            tool_name == "moss.safety.classify" ||
+            tool_name == "moss.safety.request" ||
+            tool_name == "moss.safety.authorize" ||
+            tool_name == "moss.safety.revoke" ||
+            tool_name == "self.get_device_status" ||
             tool_name == "self.lampbar.get_status" ||
             tool_name == "self.lampeye.get_status" ||
             tool_name == "moss.agent.get_status" ||
@@ -261,8 +261,18 @@ public:
             tool_name == "self.screen.set_theme" ||
             tool_name == "code_display" ||
             tool_name == "open_browser_chat_win" ||
-            StartsWith(tool_name, "self.lampbar.") ||
-            StartsWith(tool_name, "self.lampeye.")) {
+            tool_name == "self.lampbar.blink" ||
+            tool_name == "self.lampbar.breathe" ||
+            tool_name == "self.lampbar.scroll" ||
+            tool_name == "self.lampbar.rainbow" ||
+            tool_name == "self.lampbar.turn_on" ||
+            tool_name == "self.lampbar.turn_off" ||
+            tool_name == "self.lampeye.set_rgb" ||
+            tool_name == "self.lampeye.set_brightness" ||
+            tool_name == "self.lampeye.blink" ||
+            tool_name == "self.lampeye.breathe" ||
+            tool_name == "self.lampeye.turn_on" ||
+            tool_name == "self.lampeye.turn_off") {
             return RiskLevel::LowImpact;
         }
 
@@ -307,12 +317,6 @@ private:
     MossSafetyPolicy() = default;
     MossSafetyPolicy(const MossSafetyPolicy&) = delete;
     MossSafetyPolicy& operator=(const MossSafetyPolicy&) = delete;
-
-    static bool StartsWith(const std::string& value, const char* prefix) {
-        const std::string prefix_string(prefix);
-        return value.size() >= prefix_string.size() &&
-               value.compare(0, prefix_string.size(), prefix_string) == 0;
-    }
 
     static int64_t NowUs() {
         return esp_timer_get_time();
