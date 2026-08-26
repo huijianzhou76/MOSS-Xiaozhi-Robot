@@ -111,12 +111,14 @@ public:
 
     // Called when the provider has finished sending packets. Playback may still
     // have buffered Opus frames, so the engine enters Draining rather than Idle.
+    // Interrupted streams also enter Draining when the provider acknowledges
+    // stop; their audio queue should already have been flushed by Application.
     void EndInput() {
         StateCallback callback;
         TtsSession session;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (state_ != TtsState::Streaming) {
+            if (state_ != TtsState::Streaming && state_ != TtsState::Interrupted) {
                 return;
             }
             state_ = TtsState::Draining;
