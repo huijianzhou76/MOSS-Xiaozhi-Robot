@@ -12,6 +12,8 @@
 
 #include <cJSON.h>
 
+#include "safety/moss_safety_policy.h"
+
 // 添加类型别名
 using ReturnValue = std::variant<bool, int, std::string>;
 
@@ -224,6 +226,14 @@ public:
     }
 
     std::string Call(const PropertyList& properties) {
+        auto decision = moss::safety::MossSafetyPolicy::GetInstance().CheckAndConsume(name_);
+        if (!decision.allowed) {
+            throw std::runtime_error(
+                "MOSS safety blocked " + name_ +
+                " risk=" + moss::safety::MossSafetyPolicy::RiskName(decision.risk) +
+                "; request local-display authorization first");
+        }
+
         ReturnValue return_value = callback_(properties);
         // 返回结果
         cJSON* result = cJSON_CreateObject();

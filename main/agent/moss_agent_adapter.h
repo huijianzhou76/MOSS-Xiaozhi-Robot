@@ -156,6 +156,8 @@ public:
         cJSON_AddBoolToObject(caps, "memory", true);
         cJSON_AddStringToObject(caps, "memory_scope", "device-local");
         cJSON_AddBoolToObject(caps, "hardware_profile", true);
+        cJSON_AddBoolToObject(caps, "safety_gate", true);
+        cJSON_AddStringToObject(caps, "safety_policy", "standard-local-display");
         auto result = PrintJson(root);
         cJSON_Delete(root);
         return result;
