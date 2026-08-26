@@ -186,7 +186,7 @@ def create_app(
             raise HTTPException(status_code=400, detail=f"missing required tool argument: {missing}") from None
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)[:500]) from None
-        except ValueError as exc:
+        except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)[:500]) from None
         except HomeAssistantError as exc:
             raise HTTPException(status_code=502, detail=str(exc)[:500]) from None
@@ -231,6 +231,8 @@ def create_app(
                     return _jsonrpc_error(request.id, -32601, f"unknown tool: {name}")
                 missing = str(exc.args[0])[:120] if exc.args else "unknown"
                 return _jsonrpc_error(request.id, -32602, f"missing required tool argument: {missing}")
+            except (ValueError, TypeError) as exc:
+                return _jsonrpc_error(request.id, -32602, str(exc)[:500])
             except Exception as exc:  # adapter errors become bounded JSON-RPC errors
                 return _jsonrpc_error(request.id, -32000, str(exc)[:500])
 
