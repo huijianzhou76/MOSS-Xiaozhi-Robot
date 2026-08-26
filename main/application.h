@@ -65,6 +65,12 @@ public:
     void Start();
     DeviceState GetDeviceState() const { return device_state_; }
     bool IsVoiceDetected() const { return voice_detected_; }
+    bool IsAudioChannelOpened() const {
+        return protocol_ != nullptr && protocol_->IsAudioChannelOpened();
+    }
+    std::string GetSessionId() const {
+        return protocol_ ? protocol_->session_id() : std::string();
+    }
     void Schedule(std::function<void()> callback);
     void SetDeviceState(DeviceState state);
     void Alert(const char* status, const char* message, const char* emotion = "", const std::string_view& sound = "");
