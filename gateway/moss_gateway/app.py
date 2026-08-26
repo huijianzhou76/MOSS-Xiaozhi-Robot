@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import json
 from typing import Any
@@ -15,6 +16,12 @@ from .home_assistant import (
     HomeAssistantConfig,
     HomeAssistantError,
     register_home_assistant_tools,
+)
+from .missions import (
+    MissionConfig,
+    MissionEngine,
+    install_mission_routes,
+    register_mission_tools,
 )
 from .models import DeviceHello, JsonRpcRequest, ToolCallRequest
 from .registry import DeviceRegistry, DeviceSession, DuplicateDeviceError
@@ -90,8 +97,20 @@ class GatewayRuntime:
             ),
             transport=vision_transport,
         )
+        self.missions = MissionEngine(
+            MissionConfig(
+                db_path=settings.mission_db_path,
+                tick_seconds=settings.mission_tick_seconds,
+                heartbeat_seconds=settings.mission_heartbeat_seconds,
+                max_concurrent=settings.mission_max_concurrent,
+                allowed_risks=("read_only", "low_impact"),
+            ),
+            self.tools,
+            self.events,
+        )
         self._register_builtin_tools()
         register_home_assistant_tools(self.tools, self.home_assistant)
+        register_mission_tools(self.tools, self.missions)
 
     def _register_builtin_tools(self) -> None:
         async def gateway_health(_: dict[str, Any]) -> dict[str, Any]:
@@ -117,7 +136,7 @@ class GatewayRuntime:
         ready = self.settings.secure_mode or self.settings.allow_insecure
         return {
             "service": "moss-gateway",
-            "version": "0.3.0",
+            "version": "0.4.0",
             "status": "ok" if ready else "configuration_required",
             "ready": ready,
             "connected_devices": await self.devices.count(),
@@ -134,6 +153,7 @@ class GatewayRuntime:
                     "default_control_policy": "deny",
                 },
                 "vision": self.vision.configuration_summary(),
+                "missions": await self.missions.summary(),
             },
         }
 
@@ -149,11 +169,21 @@ def create_app(
         home_assistant_transport=home_assistant_transport,
         vision_transport=vision_transport,
     )
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        await runtime.missions.start()
+        try:
+            yield
+        finally:
+            await runtime.missions.stop()
+
     app = FastAPI(
         title="MOSS Gateway",
-        version="0.3.0",
+        version="0.4.0",
         docs_url="/docs",
         redoc_url=None,
+        lifespan=lifespan,
     )
     app.state.gateway = runtime
 
@@ -184,6 +214,8 @@ def create_app(
                 detail="MOSS Gateway device authorization required",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+
+    install_mission_routes(app, runtime.missions, require_admin)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -269,7 +301,7 @@ def create_app(
                 {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "moss-gateway", "version": "0.3.0"},
+                    "serverInfo": {"name": "moss-gateway", "version": "0.4.0"},
                 },
             )
 
