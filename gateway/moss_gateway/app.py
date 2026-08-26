@@ -10,6 +10,12 @@ from pydantic import ValidationError
 
 from .config import GatewaySettings
 from .events import EventBus
+from .home_assistant import (
+    HomeAssistantClient,
+    HomeAssistantConfig,
+    HomeAssistantError,
+    register_home_assistant_tools,
+)
 from .models import DeviceHello, JsonRpcRequest, ToolCallRequest
 from .registry import DeviceRegistry, DeviceSession, DuplicateDeviceError
 from .tools import ToolRegistry
@@ -53,12 +59,23 @@ def _jsonrpc_error(
 
 
 class GatewayRuntime:
-    def __init__(self, settings: GatewaySettings) -> None:
+    def __init__(self, settings: GatewaySettings, home_assistant_transport: Any | None = None) -> None:
         self.settings = settings
         self.events = EventBus(settings.event_buffer_size)
         self.devices = DeviceRegistry()
         self.tools = ToolRegistry()
+        self.home_assistant = HomeAssistantClient(
+            HomeAssistantConfig(
+                base_url=settings.home_assistant_url,
+                token=settings.home_assistant_token,
+                timeout_seconds=settings.home_assistant_timeout_seconds,
+                verify_tls=settings.home_assistant_verify_tls,
+                entity_allowlist=settings.home_assistant_entity_allowlist,
+            ),
+            transport=home_assistant_transport,
+        )
         self._register_builtin_tools()
+        register_home_assistant_tools(self.tools, self.home_assistant)
 
     def _register_builtin_tools(self) -> None:
         async def gateway_health(_: dict[str, Any]) -> dict[str, Any]:
@@ -84,7 +101,7 @@ class GatewayRuntime:
         ready = self.settings.secure_mode or self.settings.allow_insecure
         return {
             "service": "moss-gateway",
-            "version": "0.1.0",
+            "version": "0.2.0",
             "status": "ok" if ready else "configuration_required",
             "ready": ready,
             "connected_devices": await self.devices.count(),
@@ -94,14 +111,28 @@ class GatewayRuntime:
                 "admin_auth_configured": self.settings.admin_auth_configured,
                 "allow_insecure": self.settings.allow_insecure,
             },
+            "integrations": {
+                "home_assistant": {
+                    "configured": self.home_assistant.configured,
+                    "control_allowlist_count": self.home_assistant.allowlist_count,
+                    "default_control_policy": "deny",
+                }
+            },
         }
 
 
-def create_app(settings: GatewaySettings | None = None) -> FastAPI:
-    runtime = GatewayRuntime(settings or GatewaySettings.from_env())
+def create_app(
+    settings: GatewaySettings | None = None,
+    *,
+    home_assistant_transport: Any | None = None,
+) -> FastAPI:
+    runtime = GatewayRuntime(
+        settings or GatewaySettings.from_env(),
+        home_assistant_transport=home_assistant_transport,
+    )
     app = FastAPI(
         title="MOSS Gateway",
-        version="0.1.0",
+        version="0.2.0",
         docs_url="/docs",
         redoc_url=None,
     )
@@ -148,8 +179,17 @@ def create_app(settings: GatewaySettings | None = None) -> FastAPI:
     async def call_tool(call: ToolCallRequest) -> dict[str, Any]:
         try:
             result = await runtime.tools.call(call.name, call.arguments)
-        except KeyError:
-            raise HTTPException(status_code=404, detail=f"unknown tool: {call.name}") from None
+        except KeyError as exc:
+            if runtime.tools.get(call.name) is None:
+                raise HTTPException(status_code=404, detail=f"unknown tool: {call.name}") from None
+            missing = str(exc.args[0])[:120] if exc.args else "unknown"
+            raise HTTPException(status_code=400, detail=f"missing required tool argument: {missing}") from None
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)[:500]) from None
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)[:500]) from None
+        except HomeAssistantError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)[:500]) from None
         return {"ok": True, "name": call.name, "result": result}
 
     @app.post("/mcp", dependencies=[Depends(require_admin)], response_model=None)
@@ -163,7 +203,7 @@ def create_app(settings: GatewaySettings | None = None) -> FastAPI:
                 {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "moss-gateway", "version": "0.1.0"},
+                    "serverInfo": {"name": "moss-gateway", "version": "0.2.0"},
                 },
             )
 
@@ -186,8 +226,13 @@ def create_app(settings: GatewaySettings | None = None) -> FastAPI:
                 return _jsonrpc_error(request.id, -32602, "invalid tools/call params")
             try:
                 result = await runtime.tools.call(name, arguments)
-            except KeyError:
-                return _jsonrpc_error(request.id, -32601, f"unknown tool: {name}")
+            except KeyError as exc:
+                if runtime.tools.get(name) is None:
+                    return _jsonrpc_error(request.id, -32601, f"unknown tool: {name}")
+                missing = str(exc.args[0])[:120] if exc.args else "unknown"
+                return _jsonrpc_error(request.id, -32602, f"missing required tool argument: {missing}")
+            except (ValueError, TypeError) as exc:
+                return _jsonrpc_error(request.id, -32602, str(exc)[:500])
             except Exception as exc:  # adapter errors become bounded JSON-RPC errors
                 return _jsonrpc_error(request.id, -32000, str(exc)[:500])
 
