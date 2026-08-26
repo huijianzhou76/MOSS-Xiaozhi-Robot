@@ -29,6 +29,7 @@ enum class AgentPhase : uint8_t {
 struct AgentSnapshot {
     AgentBackend backend = AgentBackend::Xiaozhi;
     AgentPhase phase = AgentPhase::Offline;
+    bool channel_open = false;
     std::string session_id;
     std::string last_user_text;
     std::string last_assistant_text;
@@ -85,31 +86,88 @@ public:
         return state_;
     }
 
+    // Reconcile cached event state with a real Application snapshot. Runtime
+    // speaking/error always wins. Listening/idle do not overwrite a more
+    // specific in-flight Thinking or ExecutingTool event until a later event
+    // explicitly advances the state.
+    void SyncRuntime(bool channel_open,
+                     const std::string& session_id,
+                     AgentPhase observed_phase) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!channel_open) {
+            if (state_.channel_open || state_.phase != AgentPhase::Offline ||
+                !state_.session_id.empty()) {
+                state_.channel_open = false;
+                state_.session_id.clear();
+                phase_before_tool_valid_ = false;
+                SetPhaseLocked(AgentPhase::Offline);
+            }
+            return;
+        }
+
+        if (!state_.channel_open || state_.session_id != session_id) {
+            state_.channel_open = true;
+            state_.session_id = session_id;
+            state_.event_sequence++;
+        }
+
+        if (observed_phase == AgentPhase::Speaking ||
+            observed_phase == AgentPhase::Error) {
+            phase_before_tool_valid_ = false;
+            SetPhaseLocked(observed_phase);
+            return;
+        }
+
+        if (state_.phase == AgentPhase::Thinking ||
+            state_.phase == AgentPhase::ExecutingTool) {
+            return;
+        }
+
+        SetPhaseLocked(observed_phase);
+    }
+
     void OnChannelOpened(const std::string& session_id) {
         std::lock_guard<std::mutex> lock(mutex_);
+        const bool changed = !state_.channel_open || state_.session_id != session_id;
+        state_.channel_open = true;
         state_.session_id = session_id;
-        SetPhaseLocked(AgentPhase::Idle);
+        if (changed) {
+            state_.event_sequence++;
+        }
+        if (state_.phase == AgentPhase::Offline || state_.phase == AgentPhase::Error) {
+            SetPhaseLocked(AgentPhase::Idle);
+        }
     }
 
     void OnChannelClosed() {
         std::lock_guard<std::mutex> lock(mutex_);
+        const bool changed = state_.channel_open || !state_.session_id.empty();
+        state_.channel_open = false;
         state_.session_id.clear();
+        phase_before_tool_valid_ = false;
+        if (changed) {
+            state_.event_sequence++;
+        }
         SetPhaseLocked(AgentPhase::Offline);
     }
 
     void OnListening() {
         std::lock_guard<std::mutex> lock(mutex_);
+        phase_before_tool_valid_ = false;
         SetPhaseLocked(AgentPhase::Listening);
     }
 
     void OnThinking() {
         std::lock_guard<std::mutex> lock(mutex_);
+        phase_before_tool_valid_ = false;
         SetPhaseLocked(AgentPhase::Thinking);
     }
 
     void OnUserText(const std::string& text) {
         std::lock_guard<std::mutex> lock(mutex_);
         state_.last_user_text = text;
+        phase_before_tool_valid_ = false;
         SetPhaseLocked(AgentPhase::Thinking);
     }
 
@@ -121,17 +179,54 @@ public:
 
     void OnSpeaking(bool speaking) {
         std::lock_guard<std::mutex> lock(mutex_);
+        phase_before_tool_valid_ = false;
         SetPhaseLocked(speaking ? AgentPhase::Speaking : AgentPhase::Idle);
     }
 
     void OnToolState(bool executing) {
         std::lock_guard<std::mutex> lock(mutex_);
-        SetPhaseLocked(executing ? AgentPhase::ExecutingTool : AgentPhase::Thinking);
+        if (executing) {
+            if (state_.phase != AgentPhase::ExecutingTool) {
+                phase_before_tool_ = state_.phase;
+                phase_before_tool_valid_ = true;
+                SetPhaseLocked(AgentPhase::ExecutingTool);
+            }
+            return;
+        }
+
+        // If a tool callback triggered a newer runtime event, do not overwrite
+        // it when the callback returns.
+        if (state_.phase != AgentPhase::ExecutingTool) {
+            phase_before_tool_valid_ = false;
+            return;
+        }
+
+        const AgentPhase next = phase_before_tool_valid_
+            ? phase_before_tool_
+            : AgentPhase::Thinking;
+        phase_before_tool_valid_ = false;
+        SetPhaseLocked(next);
     }
 
     void OnError() {
         std::lock_guard<std::mutex> lock(mutex_);
+        phase_before_tool_valid_ = false;
         SetPhaseLocked(AgentPhase::Error);
+    }
+
+    std::string StatusJson() const {
+        const auto current = snapshot();
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddStringToObject(root, "schema", "moss-agent-state/1.0");
+        cJSON_AddStringToObject(root, "backend", BackendName(current.backend));
+        cJSON_AddStringToObject(root, "phase", PhaseName(current.phase));
+        cJSON_AddBoolToObject(root, "channel_open", current.channel_open);
+        cJSON_AddStringToObject(root, "session_id", current.session_id.c_str());
+        cJSON_AddNumberToObject(root, "seq", current.event_sequence);
+        cJSON_AddBoolToObject(root, "runtime_bound", true);
+        const std::string result = PrintJson(root);
+        cJSON_Delete(root);
+        return result;
     }
 
     std::string BuildHello(const std::string& board_type,
@@ -158,6 +253,7 @@ public:
         cJSON_AddBoolToObject(caps, "hardware_profile", true);
         cJSON_AddBoolToObject(caps, "safety_gate", true);
         cJSON_AddStringToObject(caps, "safety_policy", "standard-local-display");
+        cJSON_AddBoolToObject(caps, "runtime_state", true);
         auto result = PrintJson(root);
         cJSON_Delete(root);
         return result;
@@ -175,6 +271,7 @@ public:
         cJSON_AddNumberToObject(root, "seq", current.event_sequence);
         cJSON_AddStringToObject(root, "backend", BackendName(current.backend));
         cJSON_AddStringToObject(root, "phase", PhaseName(current.phase));
+        cJSON_AddBoolToObject(root, "channel_open", current.channel_open);
         cJSON_AddStringToObject(root, "session_id", current.session_id.c_str());
         if (!current.last_user_text.empty()) {
             cJSON_AddStringToObject(root, "last_user_text", current.last_user_text.c_str());
@@ -241,6 +338,8 @@ private:
 
     mutable std::mutex mutex_;
     AgentSnapshot state_;
+    AgentPhase phase_before_tool_ = AgentPhase::Idle;
+    bool phase_before_tool_valid_ = false;
 };
 
 }  // namespace moss::agent
