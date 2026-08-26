@@ -58,6 +58,8 @@ class GatewaySettings:
     mission_tick_seconds: int = 2
     mission_heartbeat_seconds: int = 30
     mission_max_concurrent: int = 1
+    memory_db_path: str = "./moss-gateway-data/memory.sqlite3"
+    memory_max_entries: int = 5000
 
     @classmethod
     def from_env(cls) -> "GatewaySettings":
@@ -101,6 +103,12 @@ class GatewaySettings:
             ),
             mission_max_concurrent=_env_int(
                 "MOSS_MISSION_MAX_CONCURRENT", 1, 1, 4
+            ),
+            memory_db_path=os.getenv(
+                "MOSS_MEMORY_DB_PATH", "./moss-gateway-data/memory.sqlite3"
+            ).strip() or "./moss-gateway-data/memory.sqlite3",
+            memory_max_entries=_env_int(
+                "MOSS_MEMORY_MAX_ENTRIES", 5000, 100, 50000
             ),
         )
 

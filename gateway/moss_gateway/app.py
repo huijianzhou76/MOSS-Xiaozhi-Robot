@@ -17,6 +17,12 @@ from .home_assistant import (
     HomeAssistantError,
     register_home_assistant_tools,
 )
+from .memory import (
+    HostMemoryStore,
+    MemoryConfig,
+    install_memory_routes,
+    register_memory_tools,
+)
 from .missions import (
     MissionConfig,
     MissionEngine,
@@ -97,6 +103,13 @@ class GatewayRuntime:
             ),
             transport=vision_transport,
         )
+        self.memory = HostMemoryStore(
+            MemoryConfig(
+                db_path=settings.memory_db_path,
+                max_entries=settings.memory_max_entries,
+            ),
+            self.events,
+        )
         self.missions = MissionEngine(
             MissionConfig(
                 db_path=settings.mission_db_path,
@@ -110,6 +123,7 @@ class GatewayRuntime:
         )
         self._register_builtin_tools()
         register_home_assistant_tools(self.tools, self.home_assistant)
+        register_memory_tools(self.tools, self.memory)
         register_mission_tools(self.tools, self.missions)
 
     def _register_builtin_tools(self) -> None:
@@ -136,7 +150,7 @@ class GatewayRuntime:
         ready = self.settings.secure_mode or self.settings.allow_insecure
         return {
             "service": "moss-gateway",
-            "version": "0.4.0",
+            "version": "0.5.0",
             "status": "ok" if ready else "configuration_required",
             "ready": ready,
             "connected_devices": await self.devices.count(),
@@ -153,6 +167,7 @@ class GatewayRuntime:
                     "default_control_policy": "deny",
                 },
                 "vision": self.vision.configuration_summary(),
+                "memory": self.memory.status(),
                 "missions": await self.missions.summary(),
             },
         }
@@ -180,7 +195,7 @@ def create_app(
 
     app = FastAPI(
         title="MOSS Gateway",
-        version="0.4.0",
+        version="0.5.0",
         docs_url="/docs",
         redoc_url=None,
         lifespan=lifespan,
@@ -215,6 +230,7 @@ def create_app(
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
+    install_memory_routes(app, runtime.memory, require_admin)
     install_mission_routes(app, runtime.missions, require_admin)
 
     @app.get("/health")
@@ -301,7 +317,7 @@ def create_app(
                 {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "moss-gateway", "version": "0.4.0"},
+                    "serverInfo": {"name": "moss-gateway", "version": "0.5.0"},
                 },
             )
 
