@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import json
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, WebSocket, WebSocketDisconnect, status
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect, status
 from pydantic import ValidationError
 
 from .config import GatewaySettings
@@ -19,6 +19,7 @@ from .home_assistant import (
 from .models import DeviceHello, JsonRpcRequest, ToolCallRequest
 from .registry import DeviceRegistry, DeviceSession, DuplicateDeviceError
 from .tools import ToolRegistry
+from .vision import HttpVisionProvider, VisionConfig, VisionError
 
 
 _ALLOWED_DEVICE_EVENTS = {
@@ -59,7 +60,12 @@ def _jsonrpc_error(
 
 
 class GatewayRuntime:
-    def __init__(self, settings: GatewaySettings, home_assistant_transport: Any | None = None) -> None:
+    def __init__(
+        self,
+        settings: GatewaySettings,
+        home_assistant_transport: Any | None = None,
+        vision_transport: Any | None = None,
+    ) -> None:
         self.settings = settings
         self.events = EventBus(settings.event_buffer_size)
         self.devices = DeviceRegistry()
@@ -73,6 +79,16 @@ class GatewayRuntime:
                 entity_allowlist=settings.home_assistant_entity_allowlist,
             ),
             transport=home_assistant_transport,
+        )
+        self.vision = HttpVisionProvider(
+            VisionConfig(
+                provider_url=settings.vision_provider_url,
+                provider_token=settings.vision_provider_token,
+                timeout_seconds=settings.vision_timeout_seconds,
+                verify_tls=settings.vision_verify_tls,
+                max_image_bytes=settings.vision_max_image_bytes,
+            ),
+            transport=vision_transport,
         )
         self._register_builtin_tools()
         register_home_assistant_tools(self.tools, self.home_assistant)
@@ -101,7 +117,7 @@ class GatewayRuntime:
         ready = self.settings.secure_mode or self.settings.allow_insecure
         return {
             "service": "moss-gateway",
-            "version": "0.2.0",
+            "version": "0.3.0",
             "status": "ok" if ready else "configuration_required",
             "ready": ready,
             "connected_devices": await self.devices.count(),
@@ -116,7 +132,8 @@ class GatewayRuntime:
                     "configured": self.home_assistant.configured,
                     "control_allowlist_count": self.home_assistant.allowlist_count,
                     "default_control_policy": "deny",
-                }
+                },
+                "vision": self.vision.configuration_summary(),
             },
         }
 
@@ -125,14 +142,16 @@ def create_app(
     settings: GatewaySettings | None = None,
     *,
     home_assistant_transport: Any | None = None,
+    vision_transport: Any | None = None,
 ) -> FastAPI:
     runtime = GatewayRuntime(
         settings or GatewaySettings.from_env(),
         home_assistant_transport=home_assistant_transport,
+        vision_transport=vision_transport,
     )
     app = FastAPI(
         title="MOSS Gateway",
-        version="0.2.0",
+        version="0.3.0",
         docs_url="/docs",
         redoc_url=None,
     )
@@ -152,9 +171,56 @@ def create_app(
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
+    async def require_device_http(
+        request: Request,
+        authorization: str | None = Header(default=None),
+        x_moss_device_token: str | None = Header(default=None),
+    ) -> None:
+        active: GatewayRuntime = request.app.state.gateway
+        presented = x_moss_device_token or _extract_bearer(authorization)
+        if not active.settings.authorize_device(presented):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="MOSS Gateway device authorization required",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
     @app.get("/health")
     async def health() -> dict[str, Any]:
         return await runtime.health()
+
+    @app.post(
+        "/api/v1/vision/explain",
+        dependencies=[Depends(require_device_http)],
+    )
+    async def explain_vision(
+        question: str = Form(...),
+        file: UploadFile = File(...),
+    ) -> dict[str, Any]:
+        if not runtime.vision.configured:
+            raise HTTPException(
+                status_code=503,
+                detail="MOSS vision provider is not configured",
+            )
+        if file.content_type != "image/jpeg":
+            await file.close()
+            raise HTTPException(status_code=415, detail="vision upload must be image/jpeg")
+
+        image = await file.read(runtime.settings.vision_max_image_bytes + 1)
+        await file.close()
+        if len(image) > runtime.settings.vision_max_image_bytes:
+            raise HTTPException(status_code=413, detail="vision image exceeds configured size limit")
+
+        try:
+            return await runtime.vision.explain(
+                question=question,
+                image=image,
+                content_type="image/jpeg",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)[:500]) from None
+        except VisionError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)[:500]) from None
 
     @app.get("/api/v1/devices", dependencies=[Depends(require_admin)])
     async def list_devices() -> dict[str, Any]:
@@ -203,7 +269,7 @@ def create_app(
                 {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "moss-gateway", "version": "0.2.0"},
+                    "serverInfo": {"name": "moss-gateway", "version": "0.3.0"},
                 },
             )
 
@@ -233,7 +299,7 @@ def create_app(
                 return _jsonrpc_error(request.id, -32602, f"missing required tool argument: {missing}")
             except (ValueError, TypeError) as exc:
                 return _jsonrpc_error(request.id, -32602, str(exc)[:500])
-            except Exception as exc:  # adapter errors become bounded JSON-RPC errors
+            except Exception as exc:
                 return _jsonrpc_error(request.id, -32000, str(exc)[:500])
 
             text = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
