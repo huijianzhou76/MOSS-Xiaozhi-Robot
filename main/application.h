@@ -23,6 +23,7 @@
 #include "audio_processor.h"
 #include "wake_word.h"
 #include "audio_debugger.h"
+#include "speech/tts_engine.h"
 #include "extend/chat_web_server/web_server.h"
 
 #define SCHEDULE_EVENT (1 << 0)
@@ -89,6 +90,7 @@ private:
     std::unique_ptr<WakeWord> wake_word_;
     std::unique_ptr<AudioProcessor> audio_processor_;
     std::unique_ptr<AudioDebugger> audio_debugger_;
+    moss::speech::TtsEngine tts_engine_;
     Ota ota_;
     std::mutex mutex_;
     std::list<std::function<void()>> main_tasks_;
