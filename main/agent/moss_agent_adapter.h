@@ -153,6 +153,8 @@ public:
         cJSON_AddBoolToObject(caps, "iot", has_iot);
         cJSON_AddBoolToObject(caps, "tts_stream", true);
         cJSON_AddBoolToObject(caps, "barge_in", true);
+        cJSON_AddBoolToObject(caps, "memory", true);
+        cJSON_AddStringToObject(caps, "memory_scope", "device-local");
         auto result = PrintJson(root);
         cJSON_Delete(root);
         return result;
