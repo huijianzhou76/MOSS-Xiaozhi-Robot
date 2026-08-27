@@ -10,6 +10,11 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request
 from pydantic import ValidationError
 
 from .config import GatewaySettings
+from .device_commands import (
+    DeviceCommandBridge,
+    install_device_command_routes,
+    register_device_read_tools,
+)
 from .events import EventBus
 from .home_assistant import (
     HomeAssistantClient,
@@ -90,6 +95,7 @@ class GatewayRuntime:
         self.events = EventBus(settings.event_buffer_size)
         self.devices = DeviceRegistry()
         self.tools = ToolRegistry()
+        self.device_commands = DeviceCommandBridge(self.devices)
         self.home_assistant = HomeAssistantClient(
             HomeAssistantConfig(
                 base_url=settings.home_assistant_url,
@@ -131,6 +137,7 @@ class GatewayRuntime:
         self._register_builtin_tools()
         register_home_assistant_tools(self.tools, self.home_assistant)
         register_memory_tools(self.tools, self.memory)
+        register_device_read_tools(self.tools, self.device_commands)
         register_mission_tools(self.tools, self.missions)
 
         planner_config = PlannerConfig(
@@ -178,9 +185,11 @@ class GatewayRuntime:
 
     async def health(self) -> dict[str, Any]:
         ready = self.settings.secure_mode or self.settings.allow_insecure
+        bridge = self.device_commands.status()
+        bridge["pending_calls"] = await self.devices.pending_count()
         return {
             "service": "moss-gateway",
-            "version": "0.6.0",
+            "version": "0.7.0",
             "status": "ok" if ready else "configuration_required",
             "ready": ready,
             "connected_devices": await self.devices.count(),
@@ -200,6 +209,7 @@ class GatewayRuntime:
                 "memory": self.memory.status(),
                 "missions": await self.missions.summary(),
                 "planner": self.planner.summary(),
+                "device_bridge": bridge,
             },
         }
 
@@ -228,7 +238,7 @@ def create_app(
 
     app = FastAPI(
         title="MOSS Gateway",
-        version="0.6.0",
+        version="0.7.0",
         docs_url="/docs",
         redoc_url=None,
         lifespan=lifespan,
@@ -266,6 +276,7 @@ def create_app(
     install_memory_routes(app, runtime.memory, require_admin)
     install_mission_routes(app, runtime.missions, require_admin)
     install_planner_routes(app, runtime.planner, require_admin)
+    install_device_command_routes(app, runtime.device_commands, require_admin)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -280,10 +291,7 @@ def create_app(
         file: UploadFile = File(...),
     ) -> dict[str, Any]:
         if not runtime.vision.configured:
-            raise HTTPException(
-                status_code=503,
-                detail="MOSS vision provider is not configured",
-            )
+            raise HTTPException(status_code=503, detail="MOSS vision provider is not configured")
         if file.content_type != "image/jpeg":
             await file.close()
             raise HTTPException(status_code=415, detail="vision upload must be image/jpeg")
@@ -294,11 +302,7 @@ def create_app(
             raise HTTPException(status_code=413, detail="vision image exceeds configured size limit")
 
         try:
-            return await runtime.vision.explain(
-                question=question,
-                image=image,
-                content_type="image/jpeg",
-            )
+            return await runtime.vision.explain(question=question, image=image, content_type="image/jpeg")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)[:500]) from None
         except VisionError as exc:
@@ -312,11 +316,7 @@ def create_app(
     @app.get("/api/v1/events", dependencies=[Depends(require_admin)])
     async def list_events(since_seq: int = 0, limit: int = 200) -> dict[str, Any]:
         events = runtime.events.list(since_seq=max(0, since_seq), limit=limit)
-        return {
-            "events": events,
-            "count": len(events),
-            "latest_seq": runtime.events.latest_sequence,
-        }
+        return {"events": events, "count": len(events), "latest_seq": runtime.events.latest_sequence}
 
     @app.get("/api/v1/tools", dependencies=[Depends(require_admin)])
     async def list_tools() -> dict[str, Any]:
@@ -344,29 +344,21 @@ def create_app(
     async def mcp(request: JsonRpcRequest) -> Any:
         if request.id is None:
             return Response(status_code=204)
-
         if request.method == "initialize":
             return _jsonrpc_result(
                 request.id,
                 {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "moss-gateway", "version": "0.6.0"},
+                    "serverInfo": {"name": "moss-gateway", "version": "0.7.0"},
                 },
             )
-
         if request.method == "tools/list":
-            tools = []
-            for tool in runtime.tools.list():
-                tools.append(
-                    {
-                        "name": tool["name"],
-                        "description": tool["description"],
-                        "inputSchema": tool["inputSchema"],
-                    }
-                )
+            tools = [
+                {"name": tool["name"], "description": tool["description"], "inputSchema": tool["inputSchema"]}
+                for tool in runtime.tools.list()
+            ]
             return _jsonrpc_result(request.id, {"tools": tools})
-
         if request.method == "tools/call":
             name = request.params.get("name")
             arguments = request.params.get("arguments", {})
@@ -383,16 +375,11 @@ def create_app(
                 return _jsonrpc_error(request.id, -32602, str(exc)[:500])
             except Exception as exc:
                 return _jsonrpc_error(request.id, -32000, str(exc)[:500])
-
             text = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
             return _jsonrpc_result(
                 request.id,
-                {
-                    "content": [{"type": "text", "text": text}],
-                    "isError": False,
-                },
+                {"content": [{"type": "text", "text": text}], "isError": False},
             )
-
         return _jsonrpc_error(request.id, -32601, f"method not found: {request.method}")
 
     @app.websocket("/ws/device")
@@ -408,88 +395,80 @@ def create_app(
         session: DeviceSession | None = None
         try:
             raw_hello = await asyncio.wait_for(
-                websocket.receive_text(),
-                timeout=runtime.settings.hello_timeout_seconds,
+                websocket.receive_text(), timeout=runtime.settings.hello_timeout_seconds
             )
             if len(raw_hello.encode("utf-8")) > runtime.settings.max_message_bytes:
                 await websocket.close(code=1009, reason="hello too large")
                 return
-
             try:
                 hello_data = json.loads(raw_hello)
                 hello = DeviceHello.model_validate(hello_data)
             except (json.JSONDecodeError, ValidationError, TypeError):
                 await websocket.close(code=1008, reason="invalid moss-agent hello")
                 return
-
             try:
                 session = await runtime.devices.register(websocket, hello)
             except DuplicateDeviceError:
                 await websocket.close(code=1008, reason="device already connected")
                 return
 
-            runtime.events.publish(
-                session.device_id,
-                "device_connected",
-                hello.model_dump(mode="json"),
-            )
-            await websocket.send_json(
-                {
-                    "event": "welcome",
-                    "protocol": "moss-gateway/1.0",
-                    "device_id": session.device_id,
-                    "gateway_session_id": session.gateway_session_id,
-                    "server_time": _utc_now(),
-                }
-            )
+            runtime.events.publish(session.device_id, "device_connected", hello.model_dump(mode="json"))
+            async with session.send_lock:
+                await websocket.send_json(
+                    {
+                        "event": "welcome",
+                        "protocol": "moss-gateway/1.0",
+                        "device_id": session.device_id,
+                        "gateway_session_id": session.gateway_session_id,
+                        "server_time": _utc_now(),
+                    }
+                )
 
             while True:
                 raw = await websocket.receive_text()
                 if len(raw.encode("utf-8")) > runtime.settings.max_message_bytes:
                     await websocket.close(code=1009, reason="message too large")
                     return
-
                 try:
                     message = json.loads(raw)
                 except json.JSONDecodeError:
-                    await websocket.send_json(
-                        {"event": "error", "code": "invalid_json"}
-                    )
+                    async with session.send_lock:
+                        await websocket.send_json({"event": "error", "code": "invalid_json"})
                     continue
-
                 if not isinstance(message, dict):
-                    await websocket.send_json(
-                        {"event": "error", "code": "invalid_event"}
-                    )
+                    async with session.send_lock:
+                        await websocket.send_json({"event": "error", "code": "invalid_event"})
                     continue
 
                 event = message.get("event")
                 if event not in _ALLOWED_DEVICE_EVENTS:
-                    await websocket.send_json(
-                        {
-                            "event": "error",
-                            "code": "unsupported_event",
-                            "received": str(event)[:80],
-                        }
-                    )
+                    async with session.send_lock:
+                        await websocket.send_json(
+                            {"event": "error", "code": "unsupported_event", "received": str(event)[:80]}
+                        )
                     continue
 
-                await runtime.devices.touch(
-                    session.device_id,
-                    session.gateway_session_id,
-                )
+                await runtime.devices.touch(session.device_id, session.gateway_session_id)
+                if event == "tool_result":
+                    await runtime.devices.resolve_tool_result(
+                        session.device_id,
+                        session.gateway_session_id,
+                        message,
+                    )
+
                 payload = dict(message)
                 payload.pop("event", None)
                 record = runtime.events.publish(session.device_id, event, payload)
 
                 if event == "heartbeat":
-                    await websocket.send_json(
-                        {
-                            "event": "heartbeat_ack",
-                            "seq": record["seq"],
-                            "server_time": _utc_now(),
-                        }
-                    )
+                    async with session.send_lock:
+                        await websocket.send_json(
+                            {
+                                "event": "heartbeat_ack",
+                                "seq": record["seq"],
+                                "server_time": _utc_now(),
+                            }
+                        )
 
         except asyncio.TimeoutError:
             await websocket.close(code=1008, reason="hello timeout")
@@ -497,10 +476,7 @@ def create_app(
             pass
         finally:
             if session is not None:
-                await runtime.devices.unregister(
-                    session.device_id,
-                    session.gateway_session_id,
-                )
+                await runtime.devices.unregister(session.device_id, session.gateway_session_id)
                 runtime.events.publish(
                     session.device_id,
                     "device_disconnected",
