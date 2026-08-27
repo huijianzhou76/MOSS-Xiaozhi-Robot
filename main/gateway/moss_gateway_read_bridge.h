@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <string>
@@ -129,9 +130,7 @@ public:
         esp_pthread_set_cfg(&cfg);
 
         try {
-            std::thread([this, context]() {
-                Execute(context);
-            }).detach();
+            std::thread([this, context]() { Execute(context); }).detach();
         } catch (...) {
             in_flight_.store(false);
             SendError(send, call_id, current_gateway_session_id,
@@ -153,8 +152,7 @@ private:
     MossGatewayReadBridge(const MossGatewayReadBridge&) = delete;
     MossGatewayReadBridge& operator=(const MossGatewayReadBridge&) = delete;
 
-    static bool HasOnlyKeys(const cJSON* object,
-                            const char* first = nullptr) {
+    static bool HasOnlyKeys(const cJSON* object, const char* first = nullptr) {
         if (!object) {
             return true;
         }
@@ -189,22 +187,19 @@ private:
             return true;
         }
         if (tool_name == "moss.safety.classify") {
-            if (!HasOnlyKeys(arguments, "tool_name")) {
-                SetError(error, "moss.safety.classify accepts only tool_name");
+            if (!HasOnlyKeys(arguments, "tool")) {
+                SetError(error, "moss.safety.classify accepts only tool");
                 return false;
             }
-            const cJSON* value = arguments ? cJSON_GetObjectItem(arguments, "tool_name") : nullptr;
+            const cJSON* value = arguments ? cJSON_GetObjectItem(arguments, "tool") : nullptr;
             if (!cJSON_IsString(value) || std::string(value->valuestring).empty() ||
                 std::string(value->valuestring).size() > kMaxToolNameBytes) {
-                SetError(error, "moss.safety.classify requires a valid tool_name");
+                SetError(error, "moss.safety.classify requires a valid tool");
                 return false;
             }
             return true;
         }
 
-        // Every other remotely exposed tool is deliberately argument-free.
-        // In particular this prevents remote include_identifiers=true on the
-        // hardware profile even though the local MCP tool supports it.
         if (!HasOnlyKeys(arguments)) {
             SetError(error, "remote read tool does not accept arguments");
             return false;
