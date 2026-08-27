@@ -106,13 +106,11 @@ class DeviceCommandBridge:
             return
 
         if name == "moss.safety.classify":
-            if set(payload) != {"tool_name"}:
-                raise DeviceCommandPolicyError(
-                    "moss.safety.classify requires only tool_name"
-                )
-            tool_name = payload.get("tool_name")
-            if not isinstance(tool_name, str) or not tool_name or len(tool_name) > 120:
-                raise DeviceCommandPolicyError("moss.safety.classify tool_name is invalid")
+            if set(payload) != {"tool"}:
+                raise DeviceCommandPolicyError("moss.safety.classify requires only tool")
+            tool = payload.get("tool")
+            if not isinstance(tool, str) or not tool or len(tool) > 120:
+                raise DeviceCommandPolicyError("moss.safety.classify tool is invalid")
             return
 
         raise DeviceCommandPolicyError(
@@ -212,12 +210,12 @@ def register_device_read_tools(registry: ToolRegistry, bridge: DeviceCommandBrid
             "type": "object",
             "properties": {
                 **base_properties,
-                "tool_name": {"type": "string", "minLength": 1, "maxLength": 120},
+                "tool": {"type": "string", "minLength": 1, "maxLength": 120},
             },
-            "required": ["device_id", "tool_name"],
+            "required": ["device_id", "tool"],
             "additionalProperties": False,
         },
-        handler=lambda args: call_fixed(args, "moss.safety.classify", ("tool_name",)),
+        handler=lambda args: call_fixed(args, "moss.safety.classify", ("tool",)),
     )
 
 
