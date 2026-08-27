@@ -30,6 +30,12 @@ from .missions import (
     register_mission_tools,
 )
 from .models import DeviceHello, JsonRpcRequest, ToolCallRequest
+from .planner import (
+    HttpPlannerProvider,
+    PlannerConfig,
+    PlannerService,
+    install_planner_routes,
+)
 from .registry import DeviceRegistry, DeviceSession, DuplicateDeviceError
 from .tools import ToolRegistry
 from .vision import HttpVisionProvider, VisionConfig, VisionError
@@ -78,6 +84,7 @@ class GatewayRuntime:
         settings: GatewaySettings,
         home_assistant_transport: Any | None = None,
         vision_transport: Any | None = None,
+        planner_transport: Any | None = None,
     ) -> None:
         self.settings = settings
         self.events = EventBus(settings.event_buffer_size)
@@ -126,6 +133,29 @@ class GatewayRuntime:
         register_memory_tools(self.tools, self.memory)
         register_mission_tools(self.tools, self.missions)
 
+        planner_config = PlannerConfig(
+            provider_url=settings.planner_provider_url,
+            provider_token=settings.planner_provider_token,
+            timeout_seconds=settings.planner_timeout_seconds,
+            verify_tls=settings.planner_verify_tls,
+            max_goal_chars=settings.planner_max_goal_chars,
+            max_context_bytes=settings.planner_max_context_bytes,
+            max_steps=settings.planner_max_steps,
+            max_argument_bytes=settings.planner_max_argument_bytes,
+            allowed_auto_risks=("read_only", "low_impact"),
+        )
+        self.planner_provider = HttpPlannerProvider(
+            planner_config,
+            transport=planner_transport,
+        )
+        self.planner = PlannerService(
+            planner_config,
+            self.planner_provider,
+            self.tools,
+            self.missions,
+            self.events,
+        )
+
     def _register_builtin_tools(self) -> None:
         async def gateway_health(_: dict[str, Any]) -> dict[str, Any]:
             return await self.health()
@@ -150,7 +180,7 @@ class GatewayRuntime:
         ready = self.settings.secure_mode or self.settings.allow_insecure
         return {
             "service": "moss-gateway",
-            "version": "0.5.0",
+            "version": "0.6.0",
             "status": "ok" if ready else "configuration_required",
             "ready": ready,
             "connected_devices": await self.devices.count(),
@@ -169,6 +199,7 @@ class GatewayRuntime:
                 "vision": self.vision.configuration_summary(),
                 "memory": self.memory.status(),
                 "missions": await self.missions.summary(),
+                "planner": self.planner.summary(),
             },
         }
 
@@ -178,11 +209,13 @@ def create_app(
     *,
     home_assistant_transport: Any | None = None,
     vision_transport: Any | None = None,
+    planner_transport: Any | None = None,
 ) -> FastAPI:
     runtime = GatewayRuntime(
         settings or GatewaySettings.from_env(),
         home_assistant_transport=home_assistant_transport,
         vision_transport=vision_transport,
+        planner_transport=planner_transport,
     )
 
     @asynccontextmanager
@@ -195,7 +228,7 @@ def create_app(
 
     app = FastAPI(
         title="MOSS Gateway",
-        version="0.5.0",
+        version="0.6.0",
         docs_url="/docs",
         redoc_url=None,
         lifespan=lifespan,
@@ -232,6 +265,7 @@ def create_app(
 
     install_memory_routes(app, runtime.memory, require_admin)
     install_mission_routes(app, runtime.missions, require_admin)
+    install_planner_routes(app, runtime.planner, require_admin)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -317,7 +351,7 @@ def create_app(
                 {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "moss-gateway", "version": "0.5.0"},
+                    "serverInfo": {"name": "moss-gateway", "version": "0.6.0"},
                 },
             )
 
