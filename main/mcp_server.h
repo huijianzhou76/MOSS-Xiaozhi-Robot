@@ -9,6 +9,7 @@
 #include <optional>
 #include <stdexcept>
 #include <thread>
+#include <algorithm>
 
 #include <cJSON.h>
 
@@ -177,10 +178,7 @@ public:
             const std::string& description,
             const PropertyList& properties,
             std::function<ReturnValue(const PropertyList&)> callback)
-        : name_(name),
-        description_(description),
-        properties_(properties),
-        callback_(callback) {}
+        : name_(name), description_(description), properties_(properties), callback_(callback) {}
 
     inline const std::string& name() const { return name_; }
     inline const std::string& description() const { return description_; }
@@ -222,7 +220,6 @@ public:
         const bool track_execution =
             name_ != "moss.agent.get_status" &&
             name_ != "moss.agent.get_contract";
-
         auto& agent = moss::agent::MossAgentAdapter::GetInstance();
         if (track_execution) {
             agent.OnToolState(true);
@@ -237,7 +234,6 @@ public:
             }
             throw;
         }
-
         if (track_execution) {
             agent.OnToolState(false);
         }
@@ -278,11 +274,43 @@ public:
     void ParseMessage(const cJSON* json);
     void ParseMessage(const std::string& message);
 
-    // Synchronous local entry point for trusted in-process transports such as
-    // the MOSS Gateway read bridge. It still validates the exact registered
-    // property schema and executes through McpTool::Call(), so the central
-    // device Safety Gate remains authoritative.
-    std::string CallToolLocal(const std::string& tool_name, const cJSON* tool_arguments);
+    // Trusted in-process entry point used by the MOSS Gateway read bridge.
+    // It deliberately reuses the registered property schema and McpTool::Call,
+    // so the device Safety Gate cannot be bypassed by this transport.
+    std::string CallToolLocal(const std::string& tool_name, const cJSON* tool_arguments) {
+        auto tool_iter = std::find_if(
+            tools_.begin(), tools_.end(),
+            [&tool_name](const McpTool* tool) { return tool->name() == tool_name; });
+        if (tool_iter == tools_.end()) {
+            throw std::runtime_error("Unknown tool: " + tool_name);
+        }
+
+        if (tool_arguments != nullptr && !cJSON_IsObject(tool_arguments)) {
+            throw std::runtime_error("Invalid arguments for tool: " + tool_name);
+        }
+
+        PropertyList arguments = (*tool_iter)->properties();
+        for (auto& argument : arguments) {
+            bool found = false;
+            if (cJSON_IsObject(tool_arguments)) {
+                auto value = cJSON_GetObjectItem(tool_arguments, argument.name().c_str());
+                if (argument.type() == kPropertyTypeBoolean && cJSON_IsBool(value)) {
+                    argument.set_value<bool>(value->valueint == 1);
+                    found = true;
+                } else if (argument.type() == kPropertyTypeInteger && cJSON_IsNumber(value)) {
+                    argument.set_value<int>(value->valueint);
+                    found = true;
+                } else if (argument.type() == kPropertyTypeString && cJSON_IsString(value)) {
+                    argument.set_value<std::string>(value->valuestring);
+                    found = true;
+                }
+            }
+            if (!argument.has_default_value() && !found) {
+                throw std::runtime_error("Missing valid argument: " + argument.name());
+            }
+        }
+        return (*tool_iter)->Call(arguments);
+    }
 
 private:
     McpServer();
