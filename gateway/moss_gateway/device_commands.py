@@ -32,51 +32,25 @@ class RemoteReadTool:
 
 
 _REMOTE_READ_TOOLS: dict[str, RemoteReadTool] = {
-    "moss.agent.get_status": RemoteReadTool(
-        remote_name="moss.agent.get_status",
-        proxy_name="device.agent.status",
-        description="Read the live MOSS agent state from one connected ESP32 device.",
-    ),
-    "moss.agent.get_contract": RemoteReadTool(
-        remote_name="moss.agent.get_contract",
-        proxy_name="device.agent.contract",
-        description="Read the MOSS agent capability contract from one connected ESP32 device.",
-    ),
-    "moss.hardware.profile": RemoteReadTool(
-        remote_name="moss.hardware.profile",
-        proxy_name="device.hardware.profile",
-        description="Read the privacy-aware hardware profile from one connected ESP32 device.",
-    ),
-    "moss.hardware.status": RemoteReadTool(
-        remote_name="moss.hardware.status",
-        proxy_name="device.hardware.status",
-        description="Read live hardware status from one connected ESP32 device.",
-    ),
-    "moss.memory.status": RemoteReadTool(
-        remote_name="moss.memory.status",
-        proxy_name="device.memory.status",
-        description="Read device-local memory health and capacity from one connected ESP32 device.",
-    ),
-    "moss.memory.list": RemoteReadTool(
-        remote_name="moss.memory.list",
-        proxy_name="device.memory.list",
-        description="List explicit device-local memory entries from one connected ESP32 device.",
-    ),
-    "moss.memory.get": RemoteReadTool(
-        remote_name="moss.memory.get",
-        proxy_name="device.memory.get",
-        description="Read one explicit device-local memory entry by key.",
-    ),
-    "moss.safety.status": RemoteReadTool(
-        remote_name="moss.safety.status",
-        proxy_name="device.safety.status",
-        description="Read the ESP32 device safety-gate status without requesting authorization.",
-    ),
-    "moss.safety.classify": RemoteReadTool(
-        remote_name="moss.safety.classify",
-        proxy_name="device.safety.classify",
-        description="Classify one ESP32-local MCP tool name using the device safety policy.",
-    ),
+    "moss.agent.get_status": RemoteReadTool("moss.agent.get_status", "Read the live MOSS agent state from one connected ESP32 device.", "device.agent.status"),
+    "moss.agent.get_contract": RemoteReadTool("moss.agent.get_contract", "Read the MOSS agent capability contract from one connected ESP32 device.", "device.agent.contract"),
+    "moss.hardware.profile": RemoteReadTool("moss.hardware.profile", "Read the privacy-aware hardware profile from one connected ESP32 device.", "device.hardware.profile"),
+    "moss.hardware.status": RemoteReadTool("moss.hardware.status", "Read live hardware status from one connected ESP32 device.", "device.hardware.status"),
+    "moss.memory.status": RemoteReadTool("moss.memory.status", "Read device-local memory health and capacity from one connected ESP32 device.", "device.memory.status"),
+    "moss.memory.list": RemoteReadTool("moss.memory.list", "List explicit device-local memory entries from one connected ESP32 device.", "device.memory.list"),
+    "moss.memory.get": RemoteReadTool("moss.memory.get", "Read one explicit device-local memory entry by key.", "device.memory.get"),
+    "moss.safety.status": RemoteReadTool("moss.safety.status", "Read the ESP32 device safety-gate status without requesting authorization.", "device.safety.status"),
+    "moss.safety.classify": RemoteReadTool("moss.safety.classify", "Classify one ESP32-local MCP tool name using the device safety policy.", "device.safety.classify"),
+}
+
+_ARGUMENT_FREE_TOOLS = {
+    "moss.agent.get_status",
+    "moss.agent.get_contract",
+    "moss.hardware.profile",
+    "moss.hardware.status",
+    "moss.memory.status",
+    "moss.memory.list",
+    "moss.safety.status",
 }
 
 
@@ -89,12 +63,7 @@ class DeviceToolCallRequest(BaseModel):
 
 
 class DeviceCommandBridge:
-    def __init__(
-        self,
-        devices: DeviceRegistry,
-        *,
-        max_argument_bytes: int = 4096,
-    ) -> None:
+    def __init__(self, devices: DeviceRegistry, *, max_argument_bytes: int = 4096) -> None:
         self.devices = devices
         self.max_argument_bytes = max_argument_bytes
 
@@ -106,6 +75,7 @@ class DeviceCommandBridge:
             "physical_actions": False,
             "sensitive_actions": False,
             "destructive_actions": False,
+            "device_side_allowlist_required": True,
         }
 
     def allowed_tools(self) -> list[dict[str, Any]]:
@@ -118,6 +88,36 @@ class DeviceCommandBridge:
             }
             for definition in _REMOTE_READ_TOOLS.values()
         ]
+
+    def _validate_arguments(self, name: str, payload: dict[str, Any]) -> None:
+        if name in _ARGUMENT_FREE_TOOLS:
+            if payload:
+                raise DeviceCommandPolicyError(
+                    f"remote read tool does not accept arguments: {name}"
+                )
+            return
+
+        if name == "moss.memory.get":
+            if set(payload) != {"key"}:
+                raise DeviceCommandPolicyError("moss.memory.get requires only key")
+            key = payload.get("key")
+            if not isinstance(key, str) or not key or len(key.encode("utf-8")) > 40:
+                raise DeviceCommandPolicyError("moss.memory.get key is invalid")
+            return
+
+        if name == "moss.safety.classify":
+            if set(payload) != {"tool_name"}:
+                raise DeviceCommandPolicyError(
+                    "moss.safety.classify requires only tool_name"
+                )
+            tool_name = payload.get("tool_name")
+            if not isinstance(tool_name, str) or not tool_name or len(tool_name) > 120:
+                raise DeviceCommandPolicyError("moss.safety.classify tool_name is invalid")
+            return
+
+        raise DeviceCommandPolicyError(
+            f"remote device tool has no approved argument contract: {name}"
+        )
 
     async def call(
         self,
@@ -133,11 +133,8 @@ class DeviceCommandBridge:
                 f"remote device tool is not in read-only allowlist: {name}"
             )
         payload = arguments or {}
-        encoded = json.dumps(
-            payload,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
+        self._validate_arguments(name, payload)
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(encoded) > self.max_argument_bytes:
             raise DeviceCommandPolicyError("remote device tool arguments exceed size limit")
 
@@ -155,21 +152,14 @@ class DeviceCommandBridge:
         return message.get("result")
 
 
-def register_device_read_tools(
-    registry: ToolRegistry,
-    bridge: DeviceCommandBridge,
-) -> None:
+def register_device_read_tools(registry: ToolRegistry, bridge: DeviceCommandBridge) -> None:
     async def call_fixed(
         args: dict[str, Any],
         remote_name: str,
         argument_keys: tuple[str, ...] = (),
     ) -> Any:
         device_id = str(args["device_id"])
-        remote_arguments = {
-            key: args[key]
-            for key in argument_keys
-            if key in args
-        }
+        remote_arguments = {key: args[key] for key in argument_keys if key in args}
         return await bridge.call(
             device_id,
             remote_name,
@@ -182,15 +172,7 @@ def register_device_read_tools(
         "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 30},
     }
 
-    for remote_name in (
-        "moss.agent.get_status",
-        "moss.agent.get_contract",
-        "moss.hardware.profile",
-        "moss.hardware.status",
-        "moss.memory.status",
-        "moss.memory.list",
-        "moss.safety.status",
-    ):
+    for remote_name in _ARGUMENT_FREE_TOOLS:
         definition = _REMOTE_READ_TOOLS[remote_name]
         assert definition.proxy_name is not None
         registry.register(
@@ -235,11 +217,7 @@ def register_device_read_tools(
             "required": ["device_id", "tool_name"],
             "additionalProperties": False,
         },
-        handler=lambda args: call_fixed(
-            args,
-            "moss.safety.classify",
-            ("tool_name",),
-        ),
+        handler=lambda args: call_fixed(args, "moss.safety.classify", ("tool_name",)),
     )
 
 
@@ -261,10 +239,7 @@ def install_device_command_routes(
         tools = bridge.allowed_tools()
         return {"tools": tools, "count": len(tools)}
 
-    @app.post(
-        "/api/v1/devices/{device_id}/tools/call",
-        dependencies=dependency,
-    )
+    @app.post("/api/v1/devices/{device_id}/tools/call", dependencies=dependency)
     async def call_device_tool(
         device_id: str,
         request: DeviceToolCallRequest,
