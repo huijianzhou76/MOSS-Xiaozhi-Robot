@@ -9,13 +9,13 @@
 #include <optional>
 #include <stdexcept>
 #include <thread>
+#include <algorithm>
 
 #include <cJSON.h>
 
 #include "agent/moss_agent_adapter.h"
 #include "safety/moss_safety_policy.h"
 
-// 添加类型别名
 using ReturnValue = std::variant<bool, int, std::string>;
 
 enum PropertyType {
@@ -30,15 +30,13 @@ private:
     PropertyType type_;
     std::variant<bool, int, std::string> value_;
     bool has_default_value_;
-    std::optional<int> min_value_;  // 新增：整数最小值
-    std::optional<int> max_value_;  // 新增：整数最大值
+    std::optional<int> min_value_;
+    std::optional<int> max_value_;
 
 public:
-    // Required field constructor
     Property(const std::string& name, PropertyType type)
         : name_(name), type_(type), has_default_value_(false) {}
 
-    // Optional field constructor with default value
     template<typename T>
     Property(const std::string& name, PropertyType type, const T& default_value)
         : name_(name), type_(type), has_default_value_(true) {
@@ -77,7 +75,6 @@ public:
 
     template<typename T>
     inline void set_value(const T& value) {
-        // 添加对设置的整数值进行范围检查
         if constexpr (std::is_same_v<T, int>) {
             if (min_value_.has_value() && value < min_value_.value()) {
                 throw std::invalid_argument("Value is below minimum allowed: " + std::to_string(min_value_.value()));
@@ -91,7 +88,6 @@ public:
 
     std::string to_json() const {
         cJSON *json = cJSON_CreateObject();
-        
         if (type_ == kPropertyTypeBoolean) {
             cJSON_AddStringToObject(json, "type", "boolean");
             if (has_default_value_) {
@@ -114,12 +110,11 @@ public:
                 cJSON_AddStringToObject(json, "default", value<std::string>().c_str());
             }
         }
-        
+
         char *json_str = cJSON_PrintUnformatted(json);
         std::string result(json_str);
         cJSON_free(json_str);
         cJSON_Delete(json);
-        
         return result;
     }
 };
@@ -159,17 +154,14 @@ public:
 
     std::string to_json() const {
         cJSON *json = cJSON_CreateObject();
-        
         for (const auto& property : properties_) {
             cJSON *prop_json = cJSON_Parse(property.to_json().c_str());
             cJSON_AddItemToObject(json, property.name().c_str(), prop_json);
         }
-        
         char *json_str = cJSON_PrintUnformatted(json);
         std::string result(json_str);
         cJSON_free(json_str);
         cJSON_Delete(json);
-        
         return result;
     }
 };
@@ -182,14 +174,11 @@ private:
     std::function<ReturnValue(const PropertyList&)> callback_;
 
 public:
-    McpTool(const std::string& name, 
-            const std::string& description, 
-            const PropertyList& properties, 
+    McpTool(const std::string& name,
+            const std::string& description,
+            const PropertyList& properties,
             std::function<ReturnValue(const PropertyList&)> callback)
-        : name_(name), 
-        description_(description), 
-        properties_(properties), 
-        callback_(callback) {}
+        : name_(name), description_(description), properties_(properties), callback_(callback) {}
 
     inline const std::string& name() const { return name_; }
     inline const std::string& description() const { return description_; }
@@ -197,17 +186,13 @@ public:
 
     std::string to_json() const {
         std::vector<std::string> required = properties_.GetRequired();
-        
         cJSON *json = cJSON_CreateObject();
         cJSON_AddStringToObject(json, "name", name_.c_str());
         cJSON_AddStringToObject(json, "description", description_.c_str());
-        
         cJSON *input_schema = cJSON_CreateObject();
         cJSON_AddStringToObject(input_schema, "type", "object");
-        
         cJSON *properties = cJSON_Parse(properties_.to_json().c_str());
         cJSON_AddItemToObject(input_schema, "properties", properties);
-        
         if (!required.empty()) {
             cJSON *required_array = cJSON_CreateArray();
             for (const auto& property : required) {
@@ -215,14 +200,11 @@ public:
             }
             cJSON_AddItemToObject(input_schema, "required", required_array);
         }
-        
         cJSON_AddItemToObject(json, "inputSchema", input_schema);
-        
         char *json_str = cJSON_PrintUnformatted(json);
         std::string result(json_str);
         cJSON_free(json_str);
         cJSON_Delete(json);
-        
         return result;
     }
 
@@ -235,12 +217,9 @@ public:
                 "; request local-display authorization first");
         }
 
-        // Status/contract introspection should report the runtime being observed,
-        // not the fact that the inspection tool itself is executing.
         const bool track_execution =
             name_ != "moss.agent.get_status" &&
             name_ != "moss.agent.get_contract";
-
         auto& agent = moss::agent::MossAgentAdapter::GetInstance();
         if (track_execution) {
             agent.OnToolState(true);
@@ -255,12 +234,10 @@ public:
             }
             throw;
         }
-
         if (track_execution) {
             agent.OnToolState(false);
         }
 
-        // 返回结果
         cJSON* result = cJSON_CreateObject();
         cJSON* content = cJSON_CreateArray();
         cJSON* text = cJSON_CreateObject();
@@ -296,6 +273,44 @@ public:
     void AddTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback);
     void ParseMessage(const cJSON* json);
     void ParseMessage(const std::string& message);
+
+    // Trusted in-process entry point used by the MOSS Gateway read bridge.
+    // It deliberately reuses the registered property schema and McpTool::Call,
+    // so the device Safety Gate cannot be bypassed by this transport.
+    std::string CallToolLocal(const std::string& tool_name, const cJSON* tool_arguments) {
+        auto tool_iter = std::find_if(
+            tools_.begin(), tools_.end(),
+            [&tool_name](const McpTool* tool) { return tool->name() == tool_name; });
+        if (tool_iter == tools_.end()) {
+            throw std::runtime_error("Unknown tool: " + tool_name);
+        }
+
+        if (tool_arguments != nullptr && !cJSON_IsObject(tool_arguments)) {
+            throw std::runtime_error("Invalid arguments for tool: " + tool_name);
+        }
+
+        PropertyList arguments = (*tool_iter)->properties();
+        for (auto& argument : arguments) {
+            bool found = false;
+            if (cJSON_IsObject(tool_arguments)) {
+                auto value = cJSON_GetObjectItem(tool_arguments, argument.name().c_str());
+                if (argument.type() == kPropertyTypeBoolean && cJSON_IsBool(value)) {
+                    argument.set_value<bool>(value->valueint == 1);
+                    found = true;
+                } else if (argument.type() == kPropertyTypeInteger && cJSON_IsNumber(value)) {
+                    argument.set_value<int>(value->valueint);
+                    found = true;
+                } else if (argument.type() == kPropertyTypeString && cJSON_IsString(value)) {
+                    argument.set_value<std::string>(value->valuestring);
+                    found = true;
+                }
+            }
+            if (!argument.has_default_value() && !found) {
+                throw std::runtime_error("Missing valid argument: " + argument.name());
+            }
+        }
+        return (*tool_iter)->Call(arguments);
+    }
 
 private:
     McpServer();

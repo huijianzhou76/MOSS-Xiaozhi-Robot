@@ -13,6 +13,7 @@
 #include "agent/moss_agent_adapter.h"
 #include "board.h"
 #include "settings.h"
+#include "moss_gateway_read_bridge.h"
 
 namespace moss::gateway {
 
@@ -63,9 +64,6 @@ public:
         return true;
     }
 
-    // Called by board networking only after the physical network is genuinely up.
-    // The worker is cheap when MOSS Gateway is not selected/configured: it simply
-    // sleeps and never touches the Xiaozhi transport.
     void NotifyNetworkReady() {
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -123,7 +121,7 @@ public:
         EnsureLoaded();
         std::lock_guard<std::mutex> lock(mutex_);
         cJSON* root = cJSON_CreateObject();
-        cJSON_AddStringToObject(root, "schema", "moss-gateway-client/1.1");
+        cJSON_AddStringToObject(root, "schema", "moss-gateway-client/1.2");
         cJSON_AddBoolToObject(root, "configured", ConfiguredLocked());
         cJSON_AddBoolToObject(root, "connected", connected_);
         cJSON_AddBoolToObject(root, "welcomed", welcomed_);
@@ -131,6 +129,8 @@ public:
         cJSON_AddBoolToObject(root, "network_ready", network_ready_);
         cJSON_AddBoolToObject(root, "autonomy_started", autonomy_task_ != nullptr);
         cJSON_AddBoolToObject(root, "manual_suspended", manual_suspended_);
+        cJSON_AddBoolToObject(root, "gateway_tool_bridge", true);
+        cJSON_AddStringToObject(root, "gateway_tool_bridge_mode", "read-only");
         const std::string safe_url = RedactUrl(url_);
         cJSON_AddStringToObject(root, "url", safe_url.c_str());
         cJSON_AddBoolToObject(root, "url_query_redacted", safe_url != url_);
@@ -373,8 +373,6 @@ private:
             initial_state_synced_ = false;
         }
 
-        // A stale disconnected socket may still exist. Destroy it outside the
-        // state mutex because its destructor may invoke OnDisconnected().
         DisconnectSocket();
 
         WebSocket* socket = Board::GetInstance().CreateWebSocketForUrl(url);
@@ -481,6 +479,7 @@ private:
             }
             return false;
         }
+        MossGatewayReadBridge::GetInstance().Advertise(root);
         cJSON_AddStringToObject(root, "device_id", Board::GetInstance().GetUuid().c_str());
         const std::string payload = PrintJson(root);
         cJSON_Delete(root);
@@ -533,21 +532,40 @@ private:
         }
 
         const cJSON* event = cJSON_GetObjectItem(root, "event");
-        const cJSON* gateway_session = cJSON_GetObjectItem(root, "gateway_session_id");
+        const std::string event_name = cJSON_IsString(event) ? event->valuestring : "";
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ++messages_received_;
-            if (cJSON_IsString(event)) {
-                last_event_ = event->valuestring;
-                if (last_event_ == "welcome") {
-                    welcomed_ = true;
-                    initial_state_synced_ = false;
-                }
-                if (last_event_ == "error") {
-                    const cJSON* code = cJSON_GetObjectItem(root, "code");
-                    last_error_ = cJSON_IsString(code) ? code->valuestring : "gateway error";
-                }
+            if (!event_name.empty()) {
+                last_event_ = event_name;
             }
+            if (event_name == "error") {
+                const cJSON* code = cJSON_GetObjectItem(root, "code");
+                last_error_ = cJSON_IsString(code) ? code->valuestring : "gateway error";
+            }
+        }
+
+        if (event_name == "tool_call") {
+            std::string current_session;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                current_session = gateway_session_id_;
+            }
+            MossGatewayReadBridge::GetInstance().HandleToolCall(
+                root,
+                current_session,
+                [this](const std::string& response) {
+                    return SendRaw(response, nullptr);
+                });
+            cJSON_Delete(root);
+            return;
+        }
+
+        if (event_name == "welcome") {
+            const cJSON* gateway_session = cJSON_GetObjectItem(root, "gateway_session_id");
+            std::lock_guard<std::mutex> lock(mutex_);
+            welcomed_ = true;
+            initial_state_synced_ = false;
             if (cJSON_IsString(gateway_session)) {
                 gateway_session_id_ = gateway_session->valuestring;
             }
